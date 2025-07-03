@@ -1,0 +1,57 @@
+training:
+  pde: Allen-Cahn
+  pde_params: [0.5] # vector of params of the pde
+  sys_mode: PINN
+  distill_mode: Derivative
+  ewc_mode: Off
+  # train_steps: 1000
+  epochs: 100
+  eval_every: 1 # in epochs
+  seed: 30
+  device: cpu
+  experiment_name: prova2
+
+hyperparams:
+  mode: Optimize
+  bc_weight: [0.001, 1.0]
+  #ic_weight:
+  phy_weight: [0.001, 1.0]
+  distill_weight: [0.0001, 0.01]
+  #ewc_weight: [0.0001, 0.01]
+  layers: [50, 50, 50, 50]
+  lr_init: [1e-5, 1e-4]
+  batch_size: [2048]
+
+paths:
+  datasets_dir: data
+  models_dir: models/der/AllenCahnSingle5/PINNfull1
+  train_dataset: train/5/full/random_dom.pth
+  train_bc_dataset: train/5/full/random_bd.pth
+  # train_ic_dataset:
+  distill_dataset: train/0/full/random_dom.pth
+  distill_model: models/AllenCahnSingle0/PINNfull0/trial0/model.pth
+  eval_dataset: val/5/full/random_dom.pth
+  eval_bc_dataset: val/5/full/random_bd.pth
+  # eval_ic_dataset:
+
+  #datasets_dir: data
+  #models_dir: models/der/AllenCahnSingle10/PINNfull2
+  #train_dataset: train/10/full/random_dom.pth
+  #train_bc_dataset: train/10/full/random_bd.pth
+  ## train_ic_dataset:
+  #distill_dataset: train/5/full/random_dom.pth
+  #distill_model: models/der/AllenCahnSingle5/PINNfull1/trial/model.pth
+  #eval_dataset: val/10/full/random_dom.pth
+  #eval_bc_dataset: val/10/full/random_bd.pth
+  ## eval_ic_dataset:
+
+  #datasets_dir: data
+  #models_dir: models/der/AllenCahnSingle15/PINNfull3
+  #train_dataset: train/15/full/random_dom.pth
+  #train_bc_dataset: train/15/full/random_bd.pth
+  ## train_ic_dataset:
+  #distill_dataset: train/10/full/random_dom.pth
+  #distill_model: models/der/AllenCahnSingle10/PINNfull2/trial/model.pth
+  #eval_dataset: val/15/full/random_dom.pth
+  #eval_bc_dataset: val/15/full/random_bd.pth
+  ## eval_ic_dataset:

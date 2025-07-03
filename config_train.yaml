@@ -1,0 +1,26 @@
+training:
+  pde: Allen-Cahn
+  sys_mode: PINN
+  distill_mode: Forgetting
+  bc_weight: 0.5
+  ic_weight: 0
+  phy_weight: 0.5
+  distill_weight: 1.0
+  layers: [50, 50, 50, 50]
+  lr_init: 1e-4
+  batch_size: 1000
+  train_steps: 1000
+  epochs: 10
+  seed: 30
+  device: cpu
+  name: prova
+
+paths:
+  results_dir: ./results
+  models_dir: ./models
+  datasets_dir: ./data
+  train_dataset: top_left_random_domain.pth
+  bc_dataset: top_left_grid_boundary.pth
+  # ic_dataset:
+  # distill_dataset:
+  eval_dataset: top_left_random_domain.pth
