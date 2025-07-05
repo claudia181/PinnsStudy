@@ -1,9 +1,10 @@
 training:
   pde: Allen-Cahn
-  pde_params: [1.5] # vector of params of the pde
+  pde_params: [0] # vector of params of the pde
   sys_mode: PINN
   distill_mode: Forgetting
   ewc_mode: Off
+  with_pde_params: True
   # train_steps: 1000
   epochs: 100
   eval_every: 1 # in epochs
@@ -18,19 +19,20 @@ hyperparams:
   phy_weight: [0.001, 1.0]
   # distill_weight: [0.001, 1.0]
   # ewc_weight: [0.001, 1.0]
+  input_units: 3
   layers: [50, 50, 50, 50]
   lr_init: [1e-6, 1e-6]
   batch_size: [2048]
 
 paths:
   datasets_dir: data
-  models_dir: models/AllenCahnSingle15/PINNfull3
-  train_dataset: train/15/full/random_dom.pth
-  train_bc_dataset: train/15/full/random_bd.pth
+  models_dir: models/AllenCahnSingle0/PINNfullProva
+  train_dataset: train/0/full/random_dom.pth
+  train_bc_dataset: train/0/full/random_bd.pth
   # train_ic_dataset:
   # distill_dataset:
   # distill_model:
-  eval_dataset: val/15/full/random_dom.pth
-  eval_bc_dataset: val/15/full/random_bd.pth
+  eval_dataset: val/0/full/random_dom.pth
+  eval_bc_dataset: val/0/full/random_bd.pth
   # eval_ic_dataset:
-  starting_model: models/AllenCahnSingle10/PINNfull2/trial0/model.pth
+  # starting_model: models/AllenCahnSingle10/PINNfull2/trial0/model.pth

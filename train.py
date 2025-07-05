@@ -25,6 +25,7 @@ def train_loop(
         train_dataloader: DataLoader,
         eval_dataloader: DataLoader,
         trial,
+        with_pde_params: bool = False,
         sys_mode: str = 'Output',
         distill_mode: str = 'Forgetting',
         ewc_mode: str = 'Off',
@@ -36,6 +37,7 @@ def train_loop(
         eval_ic_dataloader: DataLoader = None,
         distill_dataloader: DataLoader = None,
         distill_on_actual_data: bool = False,
+        distill_with_pde_params: bool = False,
         device: str = 'cpu',
         eval_every: int = 100
         ):
@@ -130,22 +132,36 @@ def train_loop(
             Dy_train = train_data[2].to(device).float()
             D2y_train = train_data[3].to(device).float()
             force_train = train_data[4].to(device).float()
+            if with_pde_params:
+                pde_params_train = train_data[5].to(device).float()
+            else:
+                pde_params_train = None
 
             # ---- Boundary data ----
             if bc_data[0] is not None:
                 x_bc = bc_data[0].to(device).float()
                 y_bc = bc_data[1].to(device).float()
+                if with_pde_params:
+                    pde_params_bc = bc_data[5].to(device).float()
+                else:
+                    pde_params_bc = None
             else:
                 x_bc = None
                 y_bc = None
+                pde_params_bc = None
 
             # ---- Initial data ----
             if ic_data[0] is not None:
                 x_ic = ic_data[0].to(device).float()
                 y_ic = ic_data[1].to(device).float()
+                if with_pde_params:
+                    pde_params_ic = ic_data[5].to(device).float()
+                else:
+                    pde_params_ic = None
             else:
                 x_ic = None
                 y_ic = None
+                pde_params_ic = None
 
             # ---- Distill data ----
             if distill_data[0] is None:
@@ -154,27 +170,36 @@ def train_loop(
                 Dy_distill = None
                 D2y_distill = None
                 force_distill = None
+                pde_params_distill = None
             else:
                 x_distill = distill_data[0].to(device).float().requires_grad_(True)
                 y_distill = distill_data[1].to(device).float().requires_grad_(True)
                 Dy_distill = distill_data[2].to(device).float().requires_grad_(True)
                 D2y_distill = distill_data[3].to(device).float().requires_grad_(True)
                 force_distill = distill_data[4].to(device).float().requires_grad_(True)
-            
+                if distill_with_pde_params:
+                    pde_params_distill= distill_data[5].to(device).float().requires_grad_(True)
+                else:
+                    pde_params_distill = None
+
             # Closure
             def closure():
                 model.opt.zero_grad()
                 loss = model.loss_fn(
                     x_new = x_train,
+                    params_new=pde_params_train,
                     y_new = y_train,
                     Dy_new = Dy_train,
                     Hy_new = D2y_train,
                     force_new = force_train,
                     x_bc = x_bc,
+                    params_bc=pde_params_bc,
                     y_bc = y_bc,
                     x_ic = x_ic,
+                    params_ic=pde_params_ic,
                     y_ic = y_ic,
                     x_distill = x_distill,
+                    params_distill=pde_params_distill,
                     y_distill = y_distill,
                     Dy_distill = Dy_distill,
                     Hy_distill = D2y_distill,
@@ -224,20 +249,34 @@ def train_loop(
                         Dy = data[2].to(device).float()
                         D2y = data[3].to(device).float()
                         force = data[4].to(device).float()
+                        if with_pde_params:
+                            pde_params = data[5].to(device).float()
+                        else:
+                            pde_params = None
 
                         if bc_data[0] is not None:
                             x_bc = bc_data[0].to(device).float()
                             y_bc = bc_data[1].to(device).float()
+                            if with_pde_params:
+                                pde_params_bc = bc_data[5].to(device).float()
+                            else:
+                                pde_params_bc = None
                         else:
                             x_bc = None
                             y_bc = None
+                            pde_params_bc = None
 
                         if ic_data[0] is not None:
                             x_ic = ic_data[0].to(device).float()
                             y_ic = ic_data[1].to(device).float()
+                            if with_pde_params:
+                                pde_params_ic = ic_data[5].to(device).float()
+                            else:
+                                pde_params_ic = None
                         else:
                             x_ic = None
                             y_ic = None
+                            pde_params_ic = None
 
                         # ---- Distill data ----
                         if distill_data[0] is None:
@@ -246,24 +285,33 @@ def train_loop(
                             Dy_distill = None
                             D2y_distill = None
                             force_distill = None
+                            if distill_with_pde_params:
+                                pde_params_distill = distill_data[5].to(device).float()
+                            else:
+                                pde_params_distill = None
                         else:
                             x_distill = distill_data[0].to(device).float().requires_grad_(True)
                             y_distill = distill_data[1].to(device).float().requires_grad_(True)
                             Dy_distill = distill_data[2].to(device).float().requires_grad_(True)
                             D2y_distill = distill_data[3].to(device).float().requires_grad_(True)
                             force_distill = distill_data[4].to(device).float().requires_grad_(True)
+                            pde_params_distill = None
 
                         loss += model.loss_fn(
                             x_new = x,
+                            params_new = pde_params,
                             y_new = y,
                             Dy_new = Dy,
                             Hy_new = D2y,
                             force_new = force,
                             x_bc = x_bc,
+                            params_bc = pde_params_bc,
                             y_bc = y_bc,
                             x_ic = x_ic,
+                            params_ic = pde_params_ic,
                             y_ic = y_ic,
                             x_distill = x_distill,
+                            params_distill = pde_params_distill,
                             y_distill = y_distill,
                             Dy_distill = Dy_distill,
                             Hy_distill = D2y_distill,
@@ -279,13 +327,16 @@ def train_loop(
                         # Evaluate the evaluation loss on test data
                         out_loss_t, der_loss_t, hes_loss_t, pde_loss_t, bc_loss_t, ic_loss_t, tot_loss_t = model.eval_losses(
                             x = x,
+                            params = pde_params,
                             y = y,
                             Dy = Dy,
                             Hy = D2y,
                             force = force,
                             x_bc = x_bc,
+                            params_bc = pde_params_bc,
                             y_bc = y_bc,
                             x_ic = x_ic,
+                            params_ic = pde_params_ic,
                             y_ic = y_ic,
                             sys_mode = sys_mode
                             )
@@ -356,11 +407,13 @@ class Objective:
             starting_model,
             pde_name,
             pde_params,
+            with_pde_params,
             sys_mode,
             distill_mode,
             ewc_mode,
             ewc_params,
             ewc_fisher_diag,
+            input_units,
             layers,
             train_steps,
             epochs,
@@ -374,6 +427,7 @@ class Objective:
             eval_ic_dataset,
             distill_dataset,
             distill_on_actual_data,
+            distill_with_pde_params,
             batch_size_list,
             lr_init_interval,
             phy_weight_interval,
@@ -386,11 +440,13 @@ class Objective:
         self.starting_model = starting_model
         self.pde_name = pde_name
         self.pde_params = pde_params
+        self.with_pde_params = with_pde_params
         self.sys_mode = sys_mode
         self.distill_mode = distill_mode
         self.ewc_mode = ewc_mode
         self.ewc_params = ewc_params
         self.ewc_fisher_diag = ewc_fisher_diag
+        self.input_units = input_units
         self.layers = layers
         self.train_steps = train_steps
         self.epochs = epochs
@@ -404,6 +460,7 @@ class Objective:
         self.eval_ic_dataset = eval_ic_dataset
         self.distill_dataset = distill_dataset
         self.distill_on_actual_data = distill_on_actual_data
+        self.distill_with_pde_params = distill_with_pde_params
         self.batch_size_list = batch_size_list
         self.lr_init_interval = lr_init_interval
         self.phy_weight_interval = phy_weight_interval
@@ -479,6 +536,7 @@ class Objective:
                 phy_weight=phy_weight,
                 distill_weight=distill_weight,
                 ewc_weight=ewc_weight,
+                input_units=self.input_units,
                 hidden_units=self.layers,
                 lr_init=lr_init,
                 device=self.device,
@@ -493,6 +551,7 @@ class Objective:
 
         stats_dict = train_loop(
             model = model,
+            with_pde_params = self.with_pde_params,
             train_steps = self.train_steps,
             epochs = self.epochs,
             optim = optim,
@@ -509,6 +568,7 @@ class Objective:
             eval_ic_dataloader = eval_ic_dataloader,
             distill_dataloader = distill_dataloader,
             distill_on_actual_data = self.distill_on_actual_data,
+            distill_with_pde_params = self.distill_with_pde_params,
             device = self.device,
             eval_every = eval_every,
             trial = trial
@@ -535,6 +595,7 @@ class Objective:
             'model_state_dict': model.state_dict(),
             'pde': self.pde_name,
             'pde_params': self.pde_params,
+            'input_units': model.input_units,
             'hidden_units': model.hidden_units,
             'lr_init': model.lr_init,
             'batch_size': self.batch_size,
@@ -598,7 +659,9 @@ if __name__ == "__main__":
     ewc_mode = get_param(training_config, 'ewc_mode', default_val='Off')
 
     # Architecture
-    str_layers = get_param(training_config, 'layers', default_val=[50, 50, 50, 50], type_func=list)
+    input_units = get_param(hyperparams_config, 'input_units', default_val=2, type_func=int)  
+    with_pde_params = get_param(training_config, 'with_pde_params', default_val=False, type_func=bool)
+    str_layers = get_param(hyperparams_config, 'layers', default_val=[50, 50, 50, 50], type_func=list)
     layers = [int(layer) for layer in str_layers]
 
     # Learning
@@ -685,12 +748,14 @@ if __name__ == "__main__":
     if distill_dataset_file == '':
         distill_dataset = None
         distill_model = None
+        distill_with_pde_params = False
         distill_mode = 'Forgetting'
     else:
         if distill_dataset_file == train_dataset_file:
             distill_on_actual_data = True
         distill_dataset = torch.load(os.path.join(datasets_dir, distill_dataset_file), weights_only=False)
         distill_model_file = get_param(paths_config, 'distill_model', default_val='')
+        distill_with_pde_params = get_param(training_config, 'distill_with_pde_params', default_val=False, type_func=bool)
         # if the distill_dataset_file is passed and the distill_model is not passed,
         # assume that the distill_dataset_file is already labeled by distill_model
         if distill_model_file == '':
@@ -698,13 +763,13 @@ if __name__ == "__main__":
         # if both are passed, label the distillation dataset whith distill_model and work with it
         else:
             distill_model = resume_model(model_path=distill_model_file, device=device)
-            distill_dataset = distill_model.label(dataset=distill_dataset, save=False)
+            distill_dataset = distill_model.label(dataset=distill_dataset, save=False, with_pde_in_params=distill_with_pde_params)
 
     # EWC
     if ewc_mode == 'On' and distill_model is not None:
         with torch.no_grad():
             ewc_params = distill_model.get_weights()
-        ewc_fisher_diag = distill_model.get_fisher_diag(dataset=distill_dataset, sys_mode=sys_mode)
+        ewc_fisher_diag = distill_model.get_fisher_diag(dataset=distill_dataset, sys_mode=sys_mode, with_pde_params=distill_with_pde_params)
     else:
         ewc_mode = 'Off'
         ewc_params = None
@@ -748,11 +813,13 @@ if __name__ == "__main__":
         starting_model = starting_model,
         pde_name = pde_name,
         pde_params = pde_params,
+        with_pde_params = with_pde_params,
         sys_mode = sys_mode,
         distill_mode = distill_mode,
         ewc_mode = ewc_mode,
         ewc_params = ewc_params,
         ewc_fisher_diag = ewc_fisher_diag,
+        input_units=input_units,
         layers = layers,
         train_steps = train_steps,
         epochs = epochs,
@@ -765,6 +832,7 @@ if __name__ == "__main__":
         eval_ic_dataset = eval_ic_dataset,
         distill_dataset = distill_dataset,
         distill_on_actual_data = distill_on_actual_data,
+        distill_with_pde_params = distill_with_pde_params,
         batch_size_list = batch_size,
         lr_init_interval = lr_init,
         phy_weight_interval = phy_weight,
@@ -783,4 +851,8 @@ if __name__ == "__main__":
     print("Best trial params:", study.best_trial.params)
     print("Best trial value:", study.best_trial.value)
 
-    #os.rename(f"{models_dir}/trial{study.best_trial.number}", f"{models_dir}/best_trial")
+    best_trial_filename = f"{models_dir}/trial{study.best_trial.number}"
+    best_trial_new_filename = f"{models_dir}/best_trial"
+    if os.path.exists(best_trial_new_filename):
+        os.remove(best_trial_new_filename)
+    os.rename(best_trial_filename, best_trial_new_filename)

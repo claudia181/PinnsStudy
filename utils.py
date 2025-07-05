@@ -90,3 +90,8 @@ class Pde:
             self.der = [f, df, d2f]
             self.residual = residual
             self.force = force
+
+            self.psolution = allen_cahn_true
+            self.pder = [allen_cahn_true, allen_cahn_pdv, allen_cahn_hes]
+            self.presidual = allen_cahn_residual
+            self.pforce = allen_cahn_forcing

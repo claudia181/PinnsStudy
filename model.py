@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.init as init
 from collections import OrderedDict
 from torch.func import vmap, jacrev, hessian
 from utils import ball_boundary_uniform, Pde, SYS_MODES, DISTILL_MODES
@@ -15,6 +16,7 @@ class PdeNet(torch.nn.Module):
     def __init__(
             self,
             pde: Pde,
+            input_units: int,
             hidden_units: list,
             lr_init: float,
             device: str,
@@ -35,6 +37,7 @@ class PdeNet(torch.nn.Module):
         self.bc_weight = bc_weight
         self.ic_weight = ic_weight
         self.phy_weight = phy_weight
+        self.input_units = input_units
         self.hidden_units = hidden_units
         self.distill_weight = distill_weight
         self.ewc_weight = ewc_weight
@@ -44,7 +47,7 @@ class PdeNet(torch.nn.Module):
 
         # Define the net, first layer
         net_dict = OrderedDict(
-            {'lin0': nn.Linear(2, hidden_units[0]),
+            {'lin0': nn.Linear(in_features=input_units, out_features=hidden_units[0]),
             'act0': activation}
         )
 
@@ -52,6 +55,10 @@ class PdeNet(torch.nn.Module):
         for i in range(1, len(hidden_units)):
             net_dict.update({f'lin{i}': nn.Linear(in_features=hidden_units[i-1], out_features=hidden_units[i])})
             net_dict.update({f'act{i}': activation})
+
+        # Glorot initialization
+        #for i in range(0, len(hidden_units)):
+        #    init.xavier_normal_(net_dict[f"lin{i}"], gain=1.0)
 
         # Define the net, last layer
         net_dict.update({f'lin{len(hidden_units)}': nn.Linear(in_features=hidden_units[-1], out_features=1)})
@@ -71,12 +78,16 @@ class PdeNet(torch.nn.Module):
     
     # x = [[m1, m2, ..., md], ..., [M1, M2, ..., Md]] -> net(x) = [^u([m1, ..., md]), ..., ^u([M1, ..., Md])]
     # Forward function
-    def forward(self, x: torch.Tensor) -> torch.Tensor:   
+    def forward(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
+        if pde_params is not None:
+            x = torch.cat([x, pde_params], dim=-1)
         return self.net(x)
     
     # [x1, x2, ..., xd] -> [[x1, x2, ..., xd]] -> net([[x1, x2, ..., xd]]) = [^u([x1, ..., xd])] -> ^u([x1, ..., xd])
     # Forward function for individual samples
-    def forward_single(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_single(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
+        if pde_params is not None:
+            x = torch.cat([x, pde_params.detach()], dim=-1)
         return self.net(x.reshape((1,-1))).reshape((-1))
     
     # Concatenates all parameters (weights and biases) of a model into a single 1D tensor.
@@ -85,20 +96,40 @@ class PdeNet(torch.nn.Module):
         # torch.cat() concatenates 1D tensors into a single 1D tensor
         return torch.cat([param.view(-1) for param in self.parameters() if param.requires_grad])
     
+    def derivative(self, order: int, x: torch.Tensor, pde_params: torch.Tensor = None):
+        if pde_params is None:
+            if order == 1:
+                return vmap(jacrev(self.forward_single))(x)[:, 0, :] # in R^(nxd)
+            elif order == 2:
+                return vmap(hessian(self.forward_single))(x)[:, 0, :, :] # in R^(nxdxd)
+            else:
+                return None
+        else:
+            if order == 1:
+                return vmap(jacrev(self.forward_single, argnums=0), in_dims=(0, 0))(x, pde_params)[:, 0, :] # in R^(nxd)
+            elif order == 2:
+                return vmap(hessian(self.forward_single, argnums=0), in_dims=(0, 0))(x, pde_params)[:, 0, :, :] # in R^(nxdxd)
+            else:
+                return None
+
 
     # loss function (1st order distillation, phase 2)
     def loss_fn(self,
         x_new: torch.Tensor, # new points inside the domain (in R^(nxd))
         y_new: torch.Tensor = None, # labels of points inside the domain (typically not available) (in R^(nx1))
+        params_new: torch.Tensor = None,
         Dy_new: torch.Tensor = None,
         Hy_new: torch.Tensor = None,
         force_new: torch.Tensor = None,
         x_bc: torch.Tensor = None, # boundary points (in R^(nxd))
         y_bc: torch.Tensor = None, # boundary values (in R^(nx1))
+        params_bc: torch.Tensor = None,
         x_ic: torch.Tensor = None, # initial points (in R^(nxd))
         y_ic: torch.Tensor = None, # initial values (in R^(nx1))
+        params_ic: torch.Tensor = None,
         x_distill: torch.Tensor = None, # distillation points inside the domain (in R^(nxd))
         y_distill: torch.Tensor = None, # distillation target values (in R^(nx1))
+        params_distill: torch.Tensor = None,
         Dy_distill: torch.Tensor = None, # distillation target values of the 1st derivative (previous model) (in R^(nxd))
         Hy_distill: torch.Tensor = None, # distillation target values of the Hessian (previous model) (in R^(nxdxd))
         force_distill: torch.Tensor = None,
@@ -145,16 +176,16 @@ class PdeNet(torch.nn.Module):
 
         if sys_mode == 'Output':
             # Get the prediction on the new points
-            y_new_pred = self.forward(x_new) # in R^(nx1)
+            y_new_pred = self.forward(x_new, params_new) # in R^(nx1)
 
             phy_loss = self.loss_container(y_new_pred, y_new)
         
         elif sys_mode == 'PINN':
             # Get the prediction on the new points
-            y_new_pred = self.forward(x_new) # in R^(nx1)
+            y_new_pred = self.forward(x_new, params_new) # in R^(nx1)
 
             # Evaluate 2nd derivative of the network wrt the input at the new points
-            Hy_new_pred = vmap(hessian(self.forward_single))(x_new)[:,0,:,:] # in R^(nxdxd)
+            Hy_new_pred = self.derivative(order=2, x=x_new, pde_params=params_new)
 
             # lambda*(uxx + uyy) - u + u^3 = 0
             # pde residual loss on the new points
@@ -164,12 +195,12 @@ class PdeNet(torch.nn.Module):
         
         elif sys_mode == 'Output+PINN':
             # Get the prediction on the new points
-            y_new_pred = self.forward(x_new) # in R^(nx1)
+            y_new_pred = self.forward(x_new, params_new) # in R^(nx1)
 
             out_loss = self.loss_container(y_new_pred, y_new)
 
             # Evaluate 2nd derivative of the network wrt the input at the new points
-            Hy_new_pred = vmap(hessian(self.forward_single))(x_new)[:,0,:,:] # in R^(nxdxd)
+            Hy_new_pred = self.derivative(order=2, x=x_new, pde_params=params_new) # in R^(nxdxd)
 
             # pde residual loss on the new points
             pde_residual = self.pde.residual(x=x_new, u_pred=y_new_pred.reshape((-1)), Hu_pred=Hy_new_pred, force=force_new)
@@ -179,24 +210,24 @@ class PdeNet(torch.nn.Module):
 
         elif sys_mode == 'Derivative':
             # Evaluate the 1st derivative of the network wrt input at the new points
-            Dy_new_pred = vmap(jacrev(self.forward_single))(x_new)[:, 0, :] # in R^(nxd)
+            Dy_new_pred = self.derivative(order=1, x=x_new, pde_params=params_new) # in R^(nxd)
 
             # 1st derivative loss on new points
             phy_loss = self.loss_container(Dy_new_pred, Dy_new) # in R
 
         elif sys_mode == 'Hessian':
             # Evaluate the 2nd derivative of the network wrt input at the new points
-            Hy_new_pred = vmap(hessian(self.forward_single))(x_new)[:,0,:,:] # in R^(nxdxd)
+            Hy_new_pred = self.derivative(order=2, x=x_new, pde_params=params_new) # in R^(nxdxd)
 
             # 2nd derivative loss on new points
             phy_loss = self.loss_container(Hy_new_pred, Hy_new) # in R
 
         elif sys_mode == 'Derivative+Hessian':
             # Evaluate the 1st derivative of the network wrt input at the new points
-            Dy_new_pred = vmap(jacrev(self.forward_single))(x_new)[:,0,:] # in R^(nxd)
+            Dy_new_pred = self.derivative(order=1, x=x_new, pde_params=params_new) # in R^(nxd)
 
             # Evaluate the 2nd derivative of the network wrt input at the new points
-            Hy_new_pred = vmap(hessian(self.forward_single))(x_new)[:,0,:,:] # in R^(nxdxd)
+            Hy_new_pred = self.derivative(order=2, x=x_new, pde_params=params_new) # in R^(nxdxd)
 
             # 1st derivative loss on new points
             der_loss = self.loss_container(Dy_new_pred, Dy_new) # in R
@@ -209,10 +240,10 @@ class PdeNet(torch.nn.Module):
 
         elif sys_mode == 'Sobolev':
             # Get the prediction on new points
-            y_new_pred = self.forward(x_new) # in R^(nx1)
+            y_new_pred = self.forward(x_new, params_new) # in R^(nx1)
 
             # Evaluate the 1st derivative of the network wrt input at the new points
-            Dy_new_pred = vmap(jacrev(self.forward_single))(x_new)[:,0,:] # in R^(nxd)
+            Dy_new_pred = self.derivative(order=1, x=x_new, pde_params=params_new) # in R^(nxd)
 
             # 1st derivative loss on new points
             der_loss = self.loss_container(Dy_new_pred, Dy_new) # in R
@@ -225,13 +256,13 @@ class PdeNet(torch.nn.Module):
 
         elif sys_mode == 'Sobolev+Hessian':
             # Get the prediction on new points
-            y_new_pred = self.forward(x_new) # in R^(nx1)
+            y_new_pred = self.forward(x_new, params_new) # in R^(nx1)
 
             # Evaluate the 1st derivative of the network wrt input at the new points
-            Dy_new_pred = vmap(jacrev(self.forward_single))(x_new)[:, 0, :] # in R^(nxd)
+            Dy_new_pred = self.derivative(order=1, x=x_new, pde_params=params_new) # in R^(nxd)
 
             # Evaluate the 2nd derivative of the network wrt input at the new points
-            Hy_new_pred = vmap(hessian(self.forward_single))(x_new)[:,0,:,:] # in R^(nxdxd)
+            Hy_new_pred = self.derivative(order=2, x=x_new, pde_params=params_new) # in R^(nxdxd)
             
             # 0th derivative loss on new points
             out_loss = self.loss_container(y_new_pred, y_new) # in R
@@ -250,7 +281,7 @@ class PdeNet(torch.nn.Module):
 
         if x_bc is not None:
             # Get the prediction on boundary points
-            y_bc_pred = self.forward(x_bc) # in R^(nx1)
+            y_bc_pred = self.forward(x_bc, params_bc) # in R^(nx1)
 
             # boundary loss on boundary points
             bc_loss = self.loss_container(y_bc_pred.reshape((-1)), y_bc.reshape((-1))) # in R
@@ -259,7 +290,7 @@ class PdeNet(torch.nn.Module):
         
         if x_ic is not None:
             # Get the prediction on initial points
-            y_ic_pred = self.forward(x_ic) # in R^(nx1)
+            y_ic_pred = self.forward(x_ic, params_ic) # in R^(nx1)
 
             # loss on initial points
             ic_loss = self.loss_container(y_ic_pred.reshape((-1)), y_ic.reshape((-1))) # in R
@@ -297,7 +328,7 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'Output':
             if y_pred is None:
                 # Get the prediction on distillation points
-                y_pred = self.forward(x_distill) # in R^(nx1)
+                y_pred = self.forward(x_distill, params_distill) # in R^(nx1)
 
             # 0th derivative loss on distillation points
             distill_loss = self.loss_container(y_pred, y_distill) # in R
@@ -305,15 +336,15 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'PINN':
             if y_pred is None:
                 # Get the prediction on the distillation points
-                y_pred = self.forward(x_distill) # in R^(nx1)
+                y_pred = self.forward(x_distill, params_distill) # in R^(nx1)
 
             if Dy_pred is None:
                 # Evaluate 1st derivative of the network wrt the input at the distillation points
-                Dy_pred = vmap(jacrev(self.forward_single))(x_distill)[:,0,:] # in R^(nxd)
+                Dy_pred = self.derivative(order=1, x=x_distill, pde_params=params_distill) # in R^(nxd)
 
             if Hy_pred is None:
                 # Evaluate 2nd derivative of the network wrt the input at the distillation points
-                Hy_pred = vmap(hessian(self.forward_single))(x_distill)[:,0,:,:] # in R^(nxdxd)
+                Hy_pred = self.derivative(order=2, x=x_distill, pde_params=params_distill) # in R^(nxdxd)
             
             # lambda*(uxx + uyy) - u + u^3 = 0
             # pde residual loss on the distillation points
@@ -324,7 +355,7 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'Derivative':
             if Dy_pred is None:
                 # Evaluate the 1st derivative of the network wrt input at the distillation points
-                Dy_pred = vmap(jacrev(self.forward_single))(x_distill)[:, 0, :] # in R^(nxd)
+                Dy_pred = self.derivative(order=1, x=x_distill, pde_params=params_distill) # in R^(nxd)
 
             # 1st derivative loss on distillation points
             distill_loss = self.loss_container(Dy_pred, Dy_distill) # in R
@@ -332,7 +363,7 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'Hessian':
             if Hy_pred is None:
                 # Evaluate the 2nd derivative of the network wrt input at the distillation points
-                Hy_pred = vmap(hessian(self.forward_single))(x_distill)[:,0,:,:] # in R^(nxdxd)
+                Hy_pred = self.derivative(order=2, x=x_distill, pde_params=params_distill) # in R^(nxdxd)
 
             # 2nd derivative loss on distillation points
             distill_loss = self.loss_container(Hy_pred, Hy_distill) # in R
@@ -340,11 +371,11 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'Derivative+Hessian':
             if Dy_pred is None:
                 # Evaluate the 1st derivative of the network wrt input at the distillation points
-                Dy_pred = vmap(jacrev(self.forward_single))(x_distill)[:,0,:] # in R^(nxd)
+                Dy_pred = self.derivative(order=1, x=x_distill, pde_params=params_distill) # in R^(nxd)
 
             if Hy_pred is None:
                 # Evaluate the 2nd derivative of the network wrt input at the distillation points
-                Hy_pred = vmap(hessian(self.forward_single))(x_distill)[:,0,:,:] # in R^(nxdxd)
+                Hy_pred = self.derivative(order=2, x=x_distill, pde_params=params_distill) # in R^(nxdxd)
 
             # 1st derivative loss on distillation points
             der_loss = self.loss_container(Dy_pred, Dy_distill) # in R
@@ -358,11 +389,11 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'Sobolev':
             if y_pred is None:
                 # Get the prediction on distillation points
-                y_pred = self.forward(x_distill) # in R^(nx1)
+                y_pred = self.forward(x_distill, params_distill) # in R^(nx1)
 
             if Dy_pred is None:
                 # Evaluate the 1st derivative of the network wrt input at the distillation points
-                Dy_pred = vmap(jacrev(self.forward_single))(x_distill)[:,0,:] # in R^(nxd)
+                Dy_pred = self.derivative(order=1, x=x_distill, pde_params=params_distill) # in R^(nxd)
 
             # 1st derivative loss on distillation points
             der_loss = self.loss_container(Dy_pred, Dy_distill) # in R
@@ -376,15 +407,15 @@ class PdeNet(torch.nn.Module):
         elif distill_mode == 'Sobolev+Hessian':
             if y_pred is None:
                 # Get the prediction on distillation points
-                y_pred = self.forward(x_distill) # in R^(nx1)
+                y_pred = self.forward(x_distill, params_distill) # in R^(nx1)
 
             if Dy_pred is None:
                 # Evaluate the 1st derivative of the network wrt input at the distillation points
-                Dy_pred = vmap(jacrev(self.forward_single))(x_distill)[:,0,:] # in R^(nxd)
+                Dy_pred = self.derivative(order=1, x=x_distill, pde_params=params_distill) # in R^(nxd)
 
             if Hy_pred is None:
                 # Evaluate the 2nd derivative of the network wrt input at the distillation points
-                Hy_pred = vmap(hessian(self.forward_single))(x_distill)[:,0,:,:] # in R^(nxdxd)
+                Hy_pred = self.derivative(order=2, x=x_distill, pde_params=params_distill) # in R^(nxdxd)
             
             # 0th derivative loss on distillation points
             out_loss = self.loss_container(y_pred, y_distill) # in R
@@ -432,7 +463,10 @@ class PdeNet(torch.nn.Module):
         x_bc: torch.Tensor = None, # boundary points (in R^(nxd))
         y_bc: torch.Tensor = None, # boundary values (in R^(nx1))
         x_ic: torch.Tensor = None, # initial points (in R^(nxd))
-        y_ic: torch.Tensor = None # initial values (in R^(nx1))
+        y_ic: torch.Tensor = None, # initial values (in R^(nx1))
+        params: torch.Tensor = None,
+        params_bc: torch.Tensor = None,
+        params_ic: torch.Tensor = None
         #print_to_screen: bool = False,    
     ):
         # Check that the mode parameter is correct
@@ -440,14 +474,14 @@ class PdeNet(torch.nn.Module):
             raise ValueError(f'mode should be in {SYS_MODES}, but found {sys_mode}')    
         
         # Get the prediction
-        y_pred = self.forward(x)
+        y_pred = self.forward(x, params)
 
         # Evaluate the 1st derivative of the network at the points
-        Dy_pred = vmap(jacrev(self.forward_single))(x)[:,0,:]
+        Dy_pred = self.derivative(order=1, x=x, pde_params=params)
 
         # Evaluate the 1st derivative of the network at the points
-        Hy_pred = vmap(hessian(self.forward_single))(x)[:,0,:,:]
-            
+        Hy_pred = self.derivative(order=2, x=x, pde_params=params)
+
         # lambda*(uxx + uyy) - u + u^3 = 0
         # Apply the differential operator without external forcing
         # pde_pred = LAMBDA * (Hy_pred[:, 0, 0] + Hy_pred[:, 1, 1]) - y_pred.reshape((-1)) + y_pred.reshape((-1))**3
@@ -499,7 +533,7 @@ class PdeNet(torch.nn.Module):
 
         if x_bc is not None:
             # Get the prediction on boundary points
-            y_bc_pred = self.forward(x_bc)
+            y_bc_pred = self.forward(x_bc, params_bc)
 
             # boundary loss on boundary points
             bc_loss = self.loss_container(y_bc_pred.reshape((-1)), y_bc.reshape((-1)))
@@ -508,7 +542,7 @@ class PdeNet(torch.nn.Module):
         
         if x_ic is not None:
             # Get the prediction on initial points
-            y_ic_pred = self.forward(x_ic)
+            y_ic_pred = self.forward(x_ic, params_ic)
 
             # loss on initial points
             ic_loss = self.loss_container(y_ic_pred.reshape((-1)), y_ic.reshape((-1)))
@@ -570,7 +604,7 @@ class PdeNet(torch.nn.Module):
         return error
     
     # Label the dataset specified by data_path using the model specified by model_path
-    def label(self, data_path=None, dataset=None, save=False):
+    def label(self, data_path=None, dataset=None, with_pde_in_params=False, save=False):
         # Seed
         seed = 30
         torch.manual_seed(seed)
@@ -600,11 +634,16 @@ class PdeNet(torch.nn.Module):
         with torch.no_grad():
             for x in dataloader:
                 x_d = x[0].to(self.device).float().requires_grad_(True)
-                y_d = self.forward(x_d)
-                Dy_d = vmap(jacrev(self.forward_single))(x_d)[:,0,:]
-                Hy_d = vmap(hessian(self.forward_single))(x_d)[:,0,:,:]
-                force_d = x[4].to(self.device).float().requires_grad_(True)
                 params_d = x[5].to(self.device).float().requires_grad_(True)
+                if with_pde_in_params:
+                    y_d = self.forward(x_d, params_d)
+                    Dy_d = self.derivative(order=1, x=x_d, pde_params=params_d)
+                    Hy_d = self.derivative(order=2, x=x_d, pde_params=params_d)
+                else:
+                    y_d = self.forward(x_d)
+                    Dy_d = self.derivative(order=1, x=x_d)
+                    Hy_d = self.derivative(order=2, x=x_d)
+                force_d = x[4].to(self.device).float().requires_grad_(True)
 
                 x_d_list.append(x_d)
                 y_d_list.append(y_d)
@@ -631,7 +670,7 @@ class PdeNet(torch.nn.Module):
             return labeled_dataset
 
     # Return the diagonal of the Fisher information mtx associated with the model parameters, computed on the data specified by the dataloader
-    def get_fisher_diag(self, dataset: TensorDataset, sys_mode: str) -> torch.Tensor:
+    def get_fisher_diag(self, dataset: TensorDataset, sys_mode: str, with_pde_params: bool = False) -> torch.Tensor:
         dataloader = DataLoader(dataset, batch_size=1000, shuffle=False)
 
         fisher_diag = {name: torch.zeros_like(param).to(self.device).float() for name, param in self.named_parameters() if param.requires_grad}
@@ -640,10 +679,15 @@ class PdeNet(torch.nn.Module):
         for z in dataloader:
             x = z[0].to(self.device).float()
             y = z[1].to(self.device).float()
+            if with_pde_params:
+                pde_params = z[5].to(self.device).float()
+            else:
+                pde_params = None
             self.zero_grad()
             loss = self.loss_fn(
                 x_new = x,
                 y_new = y,
+                params_new = pde_params,
                 sys_mode = sys_mode,
                 distill_mode = 'Forgetting',
                 ewc_mode = 'Off'
@@ -665,7 +709,7 @@ class PdeNet(torch.nn.Module):
         return fisher_diag_vector
 
 
-    def evaluate(self, data_path: str):
+    def evaluate(self, data_path: str, with_pde_params: bool = False):
         # Seed
         seed = 30
         torch.manual_seed(seed)
@@ -690,13 +734,16 @@ class PdeNet(torch.nn.Module):
         with torch.no_grad():
             for data in dataloader:
                 x = data[0].to(self.device).float().requires_grad_(True)
-
                 y_true = data[1].to(self.device).float().requires_grad_(True)
                 Dy_true = data[2].to(self.device).float().requires_grad_(True)
                 Hy_true = data[3].to(self.device).float().requires_grad_(True)
                 force_true = data[4].to(self.device).float().requires_grad_(True)
+                if with_pde_params:
+                    pde_params = data[5].to(self.device).float().requires_grad_(True)
+                else:
+                    pde_params = None
 
-                out_loss, der_loss, hes_loss, pde_loss, _, _, _ = self.eval_losses(x=x, y=y_true, Dy=Dy_true, Hy=Hy_true, force=force_true)
+                out_loss, der_loss, hes_loss, pde_loss, _, _, _ = self.eval_losses(x=x, y=y_true, Dy=Dy_true, Hy=Hy_true, force=force_true, params=pde_params)
 
                 out_tot_loss += out_loss
                 der_tot_loss += der_loss
@@ -722,6 +769,7 @@ def resume_model(model_path: str, device='cpu') -> PdeNet:
     # Extract the architectural parameters
     pde_name = checkpoint['pde']
     pde_params = checkpoint['pde_params']
+    input_units = checkpoint['input_units']
     hidden_units = checkpoint['hidden_units']
     lr_init = checkpoint['lr_init']
     bc_weight = checkpoint['bc_weight']
@@ -737,6 +785,7 @@ def resume_model(model_path: str, device='cpu') -> PdeNet:
         ic_weight=ic_weight,
         phy_weight=phy_weight,
         distill_weight=distill_weight,
+        input_units=input_units,
         hidden_units=hidden_units,
         lr_init=lr_init,
         device=device,
