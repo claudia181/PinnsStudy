@@ -46,22 +46,31 @@ def plot_model_stats(filepaths: list, labels: list, to_plot: list):
         losses = data[:, 8]
 
         if "tot" in to_plot:
+            if len(filepaths) <= 2: print(f"Last tot: {tot_losses[-1]}")
             plt.plot(steps, tot_losses, label=f'Total Loss {label}')
         if "out" in to_plot:
+            if len(filepaths) <= 2: print(f"Last out: {out_losses[-1]}")
             plt.plot(steps, out_losses, label=f'OUT Loss {label}')
         if "der" in to_plot:
+            if len(filepaths) <= 2: print(f"Last der: {der_losses[-1]}")
             plt.plot(steps, der_losses, label=f'DER Loss {label}')
         if "hes" in to_plot:
+            if len(filepaths) <= 2: print(f"Last hes: {hes_losses[-1]}")
             plt.plot(steps, hes_losses, label=f'HES Loss {label}')
         if "pde" in to_plot:
+            if len(filepaths) <= 2: print(f"Last pde: {pde_losses[-1]}")
             plt.plot(steps, pde_losses, label=f'PDE Loss {label}')
         if "bc" in to_plot:
+            if len(filepaths) <= 2: print(f"Last bc: {bc_losses[-1]}")
             plt.plot(steps, bc_losses, label=f'BC Loss {label}')
         if "ic" in to_plot:
+            if len(filepaths) <= 2: print(f"Last ic: {ic_losses[-1]}")
             plt.plot(steps, ic_losses, label=f'IC Loss {label}')
         if "train" in to_plot and "train_stats" in filepath:
+            if len(filepaths) <= 2: print(f"Last train loss: {losses[-1]}")
             plt.plot(steps, losses, label=f'train Loss {label}')
         if "test" in to_plot and "test_stats" in filepath:
+            if len(filepaths) <= 2: print(f"Last test loss: {losses[-1]}")
             plt.plot(steps, losses, label=f'test Loss {label}')
 
     plt.xlabel('Step')

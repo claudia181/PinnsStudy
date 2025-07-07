@@ -52,7 +52,8 @@ def train_loop(
             "tot_losses": [],
             "bc_losses": [],
             "ic_losses": [],
-            "losses": []
+            "losses": [],
+            "times": []
         },
         "test": {
             "step_list": [],
@@ -63,8 +64,7 @@ def train_loop(
             "tot_losses": [],
             "bc_losses": [],
             "ic_losses": [],
-            "losses": [],
-            "times": []
+            "losses": []
         }
     }
     
@@ -110,7 +110,7 @@ def train_loop(
 
         print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
 
-        #train_loss = 0.0
+        train_reminder = len(train_dataloader)
 
         for step, (train_data, bc_data, ic_data, distill_data) in enumerate(zip(train_dataloader, train_bc_iter, train_ic_iter, distill_iter)):
 
@@ -138,7 +138,7 @@ def train_loop(
                 pde_params_train = None
 
             # ---- Boundary data ----
-            if bc_data[0] is not None:
+            if bc_data[0] is not None and train_reminder <= len(train_bc_dataloader):
                 x_bc = bc_data[0].to(device).float()
                 y_bc = bc_data[1].to(device).float()
                 if with_pde_params:
@@ -181,6 +181,8 @@ def train_loop(
                     pde_params_distill= distill_data[5].to(device).float().requires_grad_(True)
                 else:
                     pde_params_distill = None
+            
+            train_reminder -= len(x_train)
 
             # Closure
             def closure():
@@ -225,7 +227,7 @@ def train_loop(
         stop_time = time.time()
         epoch_time = stop_time-start_time
         print(f'Epoch time: {epoch_time}')
-        stats_dict["test"]["times"].append(epoch_time)
+        stats_dict["train"]["times"].append(epoch_time)
 
         if (step_prefix + step) % eval_every == 0:
             model.eval()
@@ -295,7 +297,10 @@ def train_loop(
                             Dy_distill = distill_data[2].to(device).float().requires_grad_(True)
                             D2y_distill = distill_data[3].to(device).float().requires_grad_(True)
                             force_distill = distill_data[4].to(device).float().requires_grad_(True)
-                            pde_params_distill = None
+                            if distill_with_pde_params:
+                                pde_params_distill = distill_data[5].to(device).float()
+                            else:
+                                pde_params_distill = None
 
                         loss += model.loss_fn(
                             x_new = x,
@@ -548,6 +553,7 @@ class Objective:
 
         # Optimizer
         optim = Adam(params=model.parameters(), lr=lr_init)
+        #optim = LBFGS(params=model.parameters(), lr=lr_init)
 
         stats_dict = train_loop(
             model = model,
@@ -612,8 +618,18 @@ class Objective:
     
     def save_stats(self, stats_dict: dict, key: str, name: str):
         curves = []
-        for stat in stats_dict[key]: # "step_list", "tot_losses", ...
-            curves.append(torch.tensor(stats_dict[key][stat]).cpu().numpy())
+        
+        curves.append(torch.tensor(stats_dict[key]["step_list"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["tot_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["out_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["der_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["hes_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["pde_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["bc_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["ic_losses"]).cpu().numpy())
+        curves.append(torch.tensor(stats_dict[key]["losses"]).cpu().numpy())
+        if key == "train":
+            curves.append(torch.tensor(stats_dict[key]["times"]).cpu().numpy())
 
         # Stack loss curves
         stacked_curves = np.column_stack(curves)
@@ -843,10 +859,22 @@ if __name__ == "__main__":
         device = device,
         models_dir = models_dir
         )
-    
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
+
+    if starting_model is None:
+        if distill_mode == "Output":
+            pruner = optuna.pruners.ThresholdPruner(upper=0.005, n_warmup_steps=0)
+            n_trials = 20
+        elif sys_mode == "Output":
+            pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
+            n_trials = 10
+        else:
+            pruner = optuna.pruners.ThresholdPruner(upper=0.001, n_warmup_steps=0)
+            n_trials = 20
+    else:
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
+        n_trials = 10
     study = optuna.create_study(direction = "minimize", pruner=pruner)
-    study.optimize(objective, n_trials = 10)
+    study.optimize(objective, n_trials = n_trials)
 
     print("Best trial params:", study.best_trial.params)
     print("Best trial value:", study.best_trial.value)
@@ -854,5 +882,8 @@ if __name__ == "__main__":
     best_trial_filename = f"{models_dir}/trial{study.best_trial.number}"
     best_trial_new_filename = f"{models_dir}/best_trial"
     if os.path.exists(best_trial_new_filename):
-        os.remove(best_trial_new_filename)
+        if os.path.isfile(best_trial_new_filename):
+            os.remove(best_trial_new_filename)
+        elif os.path.isdir(best_trial_new_filename):
+            shutil.rmtree(best_trial_new_filename)
     os.rename(best_trial_filename, best_trial_new_filename)
