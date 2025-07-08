@@ -14,7 +14,7 @@ training:
 
 hyperparams:
   mode: Optimize
-  bc_weight: [0.001, 0.01] #[2e-2, 2e-2]
+  bc_weight: [3e-4, 3e-4] #[2e-2, 2e-2]/sqrt(n=4096)
   #ic_weight:
   phy_weight: [2e-6, 2e-6]
   #distill_weight: [0.001, 1.0]
