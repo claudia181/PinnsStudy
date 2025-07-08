@@ -17,9 +17,9 @@ generation:
   bd_steps: [0.01, 0.01]
   dom_steps: [0.01, 0.01]
 
-  n_rand_bound: 2048 # = max{sqrt(n_rand_dom) * 4, batch_size}
+  n_rand_bound: 1024 # = max{sqrt(n_rand_dom) * 4, batch_size}
   n_rand_dom: 4096
-  n_rand_bound_sub: 1024 # = max{sqrt(n_rand_dom / 4) * 4, batch_size}
+  n_rand_bound_sub: 256 # = max{sqrt(n_rand_dom / 4) * 4, batch_size}
 
 options:
   data_dir: data/val

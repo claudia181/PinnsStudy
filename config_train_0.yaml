@@ -14,29 +14,30 @@ training:
 
 hyperparams:
   mode: Optimize
-  #bc_weight: [0.001, 1.0]
+  bc_weight: [0.001, 0.01] #[2e-2, 2e-2]
   #ic_weight:
-  phy_weight: [1.0, 1.0]
+  phy_weight: [2e-6, 2e-6]
   #distill_weight: [0.001, 1.0]
   #ewc_weight: [0.001, 1.0]
   input_units: 2
   layers: [50, 50, 50, 50]
   lr_init: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3]
-  batch_size: [2048]
+  batch_size: [1024, 2048]
   pruner: "median"
-  #threshold:
+  #threshold: 0.027
+  #n_warmup_steps: 25
   n_trials: 10
   optimizer: Adam
 
 paths:
   datasets_dir: data
-  models_dir: models/step0/AllenCahnSingle0/PINNfullAAAA
+  models_dir: models/step0/AllenCahnSingle0/PINNfullB3
   train_dataset: train/0/full/random_dom.pth
-  #train_bc_dataset: train/0/full/random_bd.pth
+  train_bc_dataset: train/0/full/random_bd.pth
   # train_ic_dataset:
   # distill_model:
   #distill_dataset: train/0/full/random_dom.pth
   eval_dataset: val/0/full/random_dom.pth
-  #eval_bc_dataset: val/0/full/random_bd.pth
+  eval_bc_dataset: val/0/full/random_bd.pth
   # eval_ic_dataset:
   #starting_model: models/AllenCahnSingle0/PINNfull0ti/best_trial/model.pth

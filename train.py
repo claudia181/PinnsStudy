@@ -110,8 +110,6 @@ def train_loop(
 
         print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
 
-        train_reminder = len(train_dataloader)
-
         for step, (train_data, bc_data, ic_data, distill_data) in enumerate(zip(train_dataloader, train_bc_iter, train_ic_iter, distill_iter)):
 
             if train_steps >= 0 and step > train_steps:
@@ -138,7 +136,7 @@ def train_loop(
                 pde_params_train = None
 
             # ---- Boundary data ----
-            if bc_data[0] is not None and train_reminder <= len(train_bc_dataloader):
+            if bc_data[0] is not None:
                 x_bc = bc_data[0].to(device).float()
                 y_bc = bc_data[1].to(device).float()
                 if with_pde_params:
@@ -181,8 +179,6 @@ def train_loop(
                     pde_params_distill= distill_data[5].to(device).float().requires_grad_(True)
                 else:
                     pde_params_distill = None
-            
-            train_reminder -= len(x_train)
 
             # Closure
             def closure():
@@ -327,7 +323,7 @@ def train_loop(
                             sys_mode = sys_mode,
                             distill_mode = distill_mode,
                             ewc_mode = ewc_mode
-                        ).item()
+                            ).item()
 
                         # Evaluate the evaluation loss on test data
                         out_loss_t, der_loss_t, hes_loss_t, pde_loss_t, bc_loss_t, ic_loss_t, tot_loss_t = model.eval_losses(
@@ -596,7 +592,7 @@ class Objective:
         self.save_stats(stats_dict=stats_dict, key="train", name=name)
         self.save_stats(stats_dict=stats_dict, key="test", name=name)
 
-        return stats_dict["test"]["losses"][-1]
+        return stats_dict["test"]["out_losses"][-1]
 
     def save_model(self, model: PdeNet, name: str):
         # Save the model
@@ -685,6 +681,7 @@ if __name__ == "__main__":
     layers = [int(layer) for layer in str_layers]
     pruner = get_param(hyperparams_config, 'pruner', default_val='median', type_func=str)
     threshold = get_param(hyperparams_config, 'threshold', default_val=1.0, type_func=float)
+    n_warmup_steps = get_param(hyperparams_config, 'n_warmup_steps', default_val=0, type_func=int)
     n_trials = get_param(hyperparams_config, 'n_trials', default_val=10, type_func=int)
     optim = get_param(hyperparams_config, 'optimizer', default_val='Adam', type_func=str)
 
@@ -870,9 +867,9 @@ if __name__ == "__main__":
         )
 
     if pruner == "threshold":
-        opt_pruner = optuna.pruners.ThresholdPruner(upper=threshold, n_warmup_steps=0)
+        opt_pruner = optuna.pruners.ThresholdPruner(upper=threshold, n_warmup_steps=n_warmup_steps)
     else:
-        opt_pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
+        opt_pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=n_warmup_steps, interval_steps=1)
     
     study = optuna.create_study(direction = "minimize", pruner=opt_pruner)
     study.optimize(objective, n_trials = n_trials)
