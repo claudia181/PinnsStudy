@@ -3,3 +3,5 @@ numpy
 matplotlib
 optuna
 PyYAML
+fipy
+sfepy

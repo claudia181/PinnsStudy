@@ -422,6 +422,7 @@ class Objective:
             layers,
             train_steps,
             epochs,
+            optim,
             eval_every,
             device,
             train_dataset,
@@ -434,7 +435,7 @@ class Objective:
             distill_on_actual_data,
             distill_with_pde_params,
             batch_size_list,
-            lr_init_interval,
+            lr_init_list,
             phy_weight_interval,
             bc_weight_interval,
             ic_weight_interval,
@@ -455,6 +456,7 @@ class Objective:
         self.layers = layers
         self.train_steps = train_steps
         self.epochs = epochs
+        self.optimizer = optim
         self.eval_every = eval_every
         self.device = device
         self.train_dataset = train_dataset
@@ -467,7 +469,7 @@ class Objective:
         self.distill_on_actual_data = distill_on_actual_data
         self.distill_with_pde_params = distill_with_pde_params
         self.batch_size_list = batch_size_list
-        self.lr_init_interval = lr_init_interval
+        self.lr_init_list = lr_init_list
         self.phy_weight_interval = phy_weight_interval
         self.bc_weight_interval = bc_weight_interval
         self.ic_weight_interval = ic_weight_interval
@@ -490,7 +492,7 @@ class Objective:
         
         ewc_weight = trial.suggest_float("ewc_weight", self.ewc_weight_interval[0], self.ewc_weight_interval[1], log=True)
         self.batch_size = trial.suggest_categorical("batch_size", self.batch_size_list)
-        lr_init = trial.suggest_float("lr_init", self.lr_init_interval[0], self.lr_init_interval[1], log=True)
+        lr_init = trial.suggest_categorical("lr_init", self.lr_init_list)
 
         # Seed
         torch.manual_seed(self.seed)
@@ -552,8 +554,10 @@ class Objective:
             model = resume_model(model_path=self.starting_model, device=self.device)
 
         # Optimizer
-        optim = Adam(params=model.parameters(), lr=lr_init)
-        #optim = LBFGS(params=model.parameters(), lr=lr_init)
+        if self.optimizer == "LBFGS":
+            optim = LBFGS(params=model.parameters(), lr=lr_init)
+        else:
+            optim = Adam(params=model.parameters(), lr=lr_init)
 
         stats_dict = train_loop(
             model = model,
@@ -679,6 +683,10 @@ if __name__ == "__main__":
     with_pde_params = get_param(training_config, 'with_pde_params', default_val=False, type_func=bool)
     str_layers = get_param(hyperparams_config, 'layers', default_val=[50, 50, 50, 50], type_func=list)
     layers = [int(layer) for layer in str_layers]
+    pruner = get_param(hyperparams_config, 'pruner', default_val='median', type_func=str)
+    threshold = get_param(hyperparams_config, 'threshold', default_val=1.0, type_func=float)
+    n_trials = get_param(hyperparams_config, 'n_trials', default_val=10, type_func=int)
+    optim = get_param(hyperparams_config, 'optimizer', default_val='Adam', type_func=str)
 
     # Learning
     train_steps = get_param(training_config, 'train_steps', default_val=-1, type_func=int)
@@ -806,7 +814,7 @@ if __name__ == "__main__":
         ewc_weight_fixed = get_param(hyperparams_config, 'ewc_weight', default_val=1.0, type_func=float)
         ewc_weight = [ewc_weight_fixed, ewc_weight_fixed]
         lr_init_fixed = get_param(hyperparams_config, 'lr_init', default_val=1e-5, type_func=float)
-        lr_init = [lr_init_fixed, lr_init_fixed]
+        lr_init = [lr_init_fixed]
         batch_size = [get_param(hyperparams_config, 'batch_size', default_val=1024, type_func=int)]
     else: # hyp_mode == 'Optimize'
         bc_weight_str = get_param(hyperparams_config, 'bc_weight', default_val=[1.0, 1.0], type_func=list)
@@ -819,7 +827,7 @@ if __name__ == "__main__":
         distill_weight = [float(x) for x in distill_weight_str]
         ewc_weight_str = get_param(hyperparams_config, 'ewc_weight', default_val=[1.0, 1.0], type_func=list)
         ewc_weight = [float(x) for x in ewc_weight_str]
-        lr_init_str = get_param(hyperparams_config, 'lr_init', default_val=[1e-5, 1e-1], type_func=list)
+        lr_init_str = get_param(hyperparams_config, 'lr_init', default_val=[1e-5], type_func=list)
         lr_init = [float(x) for x in lr_init_str]
         batch_size_str = get_param(hyperparams_config, 'batch_size', default_val=[1024], type_func=list)
         batch_size = [int(x) for x in batch_size_str]
@@ -839,6 +847,7 @@ if __name__ == "__main__":
         layers = layers,
         train_steps = train_steps,
         epochs = epochs,
+        optim = optim,
         eval_every = eval_every,
         train_dataset = train_dataset,
         eval_dataset = eval_dataset,
@@ -850,7 +859,7 @@ if __name__ == "__main__":
         distill_on_actual_data = distill_on_actual_data,
         distill_with_pde_params = distill_with_pde_params,
         batch_size_list = batch_size,
-        lr_init_interval = lr_init,
+        lr_init_list = lr_init,
         phy_weight_interval = phy_weight,
         bc_weight_interval = bc_weight,
         ic_weight_interval = ic_weight,
@@ -860,20 +869,12 @@ if __name__ == "__main__":
         models_dir = models_dir
         )
 
-    if starting_model is None:
-        if distill_mode == "Output":
-            pruner = optuna.pruners.ThresholdPruner(upper=0.005, n_warmup_steps=0)
-            n_trials = 20
-        elif sys_mode == "Output":
-            pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
-            n_trials = 10
-        else:
-            pruner = optuna.pruners.ThresholdPruner(upper=0.001, n_warmup_steps=0)
-            n_trials = 20
+    if pruner == "threshold":
+        opt_pruner = optuna.pruners.ThresholdPruner(upper=threshold, n_warmup_steps=0)
     else:
-        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
-        n_trials = 10
-    study = optuna.create_study(direction = "minimize", pruner=pruner)
+        opt_pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
+    
+    study = optuna.create_study(direction = "minimize", pruner=opt_pruner)
     study.optimize(objective, n_trials = n_trials)
 
     print("Best trial params:", study.best_trial.params)

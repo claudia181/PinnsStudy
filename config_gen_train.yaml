@@ -1,6 +1,6 @@
 generation:
   pde_name: Allen-Cahn
-  pde_params: [[0.01], [0.5], [1.0], [1.5], [2.0], [2.5], [3.0], [3.5]]
+  pde_params: [[0.0], [0.5], [1.0], [1.5], [2.0], [2.5], [3.0], [3.5]]
 
   seed: 70
 
@@ -17,9 +17,9 @@ generation:
   bd_steps: [0.01, 0.01]
   dom_steps: [0.01, 0.01]
 
-  n_rand_bound: 2048 # = max{sqrt(4096) * 4, batch_size} = max{256, 2048}
-  n_rand_dom: 10000 #4096
-  n_rand_bound_sub: 1024 # = max{sqrt(4096 / 4) * 4, batch_size} = max{128, 1024}
+  n_rand_bound: 2048 # = max{sqrt(n_rand_dom) * 4, batch_size}
+  n_rand_dom: 4096
+  n_rand_bound_sub: 1024 # = max{sqrt(n_rand_dom / 4) * 4, batch_size}
 
 options:
   data_dir: data/train
