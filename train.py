@@ -1,396 +1,40 @@
+"""
+train.py
+===========
+
+This module contains:
+- start_train (*)
+- get_param (used by start_train)
+
+This module implements the interface to start a training process under given configurations.
+It is possible to pass the training configurations
+- through a dictionary argument to start_train,
+- directly as arguments to start_train,
+- through a YAML file (following to a given format).
+The 2nd option allows to pass directly datasets or models objects instead of paths to stored files.
+"""
+
+
 import torch
+from torch.utils.data import TensorDataset, ConcatDataset
 import argparse
-from torch.utils.data import DataLoader
 import numpy as np
 import random
 import os
-from itertools import cycle
-from model import PdeNet, resume_model
-from torch.optim import LBFGS, Adam
-import time
 import yaml
-from utils import Pde
-import sys
-import itertools
-from itertools import cycle
+from load_store_utils import resume_model
 import optuna
+from optuna.trial import TrialState
 import shutil
+from optuna_objective import Objective
+from model import PdeNet
+from data_utils import subsample, subset_to_tensordataset, replace_labels, extract_TensorDataset, extract_boundary, extract_interior, merge_datasets, include_time_in_input, exclude_space_in_input
+from load_store_utils import store_split
+from generate import X, U
+import sys
+import copy
 
-# =================================== TRAINING LOOP DEFINITION ===================================
-def train_loop(
-        model: PdeNet,
-        train_steps: int,
-        epochs: int,
-        optim: torch.optim.Optimizer,
-        train_dataloader: DataLoader,
-        eval_dataloader: DataLoader,
-        trial,
-        with_pde_params: bool = False,
-        sys_mode: str = 'Output',
-        distill_mode: str = 'Forgetting',
-        ewc_mode: str = 'Off',
-        ewc_params: torch.Tensor = None,
-        ewc_fisher_diag: torch.Tensor = None,
-        train_bc_dataloader: DataLoader = None,
-        train_ic_dataloader: DataLoader = None,
-        eval_bc_dataloader: DataLoader = None,
-        eval_ic_dataloader: DataLoader = None,
-        distill_dataloader: DataLoader = None,
-        distill_on_actual_data: bool = False,
-        distill_with_pde_params: bool = False,
-        device: str = 'cpu',
-        eval_every: int = 100
-        ):
-    # Stats dictionary
-    stats_dict = {
-        "train": {
-            "step_list": [],
-            "out_losses": [],
-            "der_losses": [],
-            "hes_losses": [],
-            "pde_losses": [],
-            "tot_losses": [],
-            "bc_losses": [],
-            "ic_losses": [],
-            "losses": [],
-            "times": []
-        },
-        "test": {
-            "step_list": [],
-            "out_losses": [],
-            "der_losses": [],
-            "hes_losses": [],
-            "pde_losses": [],
-            "tot_losses": [],
-            "bc_losses": [],
-            "ic_losses": [],
-            "losses": []
-        }
-    }
-    
-    # Prepare Iterators for the Loop (handling empty DataLoaders)
-
-    if train_bc_dataloader is not None:
-        train_bc_iter = cycle(train_bc_dataloader)
-    else:
-        train_bc_iter = itertools.repeat((None, None))
-
-    if train_ic_dataloader is not None:
-        train_ic_iter = cycle(train_ic_dataloader)
-    else:
-        train_ic_iter = itertools.repeat((None, None))
-    
-    if eval_bc_dataloader is not None:
-        eval_bc_iter = cycle(eval_bc_dataloader)
-    else:
-        eval_bc_iter = itertools.repeat((None, None))
-
-    if eval_ic_dataloader is not None:
-        eval_ic_iter = cycle(eval_ic_dataloader)
-    else:
-        eval_ic_iter = itertools.repeat((None, None))
-
-    if distill_dataloader is not None:
-        distill_iter = cycle(distill_dataloader)
-    else:
-        distill_iter = itertools.repeat((None, None, None, None))
-
-    for epoch in range(epochs):
-
-        # ----------------------------------- Start of epoch -----------------------------------
-
-        # Put the model in training mode
-        model.train()
-
-        if train_steps < 0:
-            step_prefix = epoch * len(train_dataloader)
-        else:
-            step_prefix = epoch * min(len(train_dataloader), train_steps)
-        start_time = time.time()
-
-        print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
-
-        for step, (train_data, bc_data, ic_data, distill_data) in enumerate(zip(train_dataloader, train_bc_iter, train_ic_iter, distill_iter)):
-
-            if train_steps >= 0 and step > train_steps:
-                break
-            
-            # Load batches from dataloaders:
-            # ---- Domain data ----
-            x_train = train_data[0].to(device).float().requires_grad_(True)
-
-            # Note: Generally labels (0th order information) are not available for the data inside the domain.
-            #       DERL, PINN, HESL, DERL+HESL do not use them.
-            #       For DERL, PINN, HESL, DERL+HESL, we use lables (we know a closed form solution)
-            #       only to assess the method, not to fit the model.
-            #       In the case of OUTL, SOB, OUTL+PINN, SOB+HES instead, labels inside the domain are needed.
-            y_train = train_data[1].to(device).float()
-
-            # We assume instead that labels for the derivative are available
-            Dy_train = train_data[2].to(device).float()
-            D2y_train = train_data[3].to(device).float()
-            force_train = train_data[4].to(device).float()
-            if with_pde_params:
-                pde_params_train = train_data[5].to(device).float()
-            else:
-                pde_params_train = None
-
-            # ---- Boundary data ----
-            if bc_data[0] is not None:
-                x_bc = bc_data[0].to(device).float()
-                y_bc = bc_data[1].to(device).float()
-                if with_pde_params:
-                    pde_params_bc = bc_data[5].to(device).float()
-                else:
-                    pde_params_bc = None
-            else:
-                x_bc = None
-                y_bc = None
-                pde_params_bc = None
-
-            # ---- Initial data ----
-            if ic_data[0] is not None:
-                x_ic = ic_data[0].to(device).float()
-                y_ic = ic_data[1].to(device).float()
-                if with_pde_params:
-                    pde_params_ic = ic_data[5].to(device).float()
-                else:
-                    pde_params_ic = None
-            else:
-                x_ic = None
-                y_ic = None
-                pde_params_ic = None
-
-            # ---- Distill data ----
-            if distill_data[0] is None:
-                x_distill = None
-                y_distill = None
-                Dy_distill = None
-                D2y_distill = None
-                force_distill = None
-                pde_params_distill = None
-            else:
-                x_distill = distill_data[0].to(device).float().requires_grad_(True)
-                y_distill = distill_data[1].to(device).float().requires_grad_(True)
-                Dy_distill = distill_data[2].to(device).float().requires_grad_(True)
-                D2y_distill = distill_data[3].to(device).float().requires_grad_(True)
-                force_distill = distill_data[4].to(device).float().requires_grad_(True)
-                if distill_with_pde_params:
-                    pde_params_distill= distill_data[5].to(device).float().requires_grad_(True)
-                else:
-                    pde_params_distill = None
-
-            # Closure
-            def closure():
-                model.opt.zero_grad()
-                loss = model.loss_fn(
-                    x_new = x_train,
-                    params_new=pde_params_train,
-                    y_new = y_train,
-                    Dy_new = Dy_train,
-                    Hy_new = D2y_train,
-                    force_new = force_train,
-                    x_bc = x_bc,
-                    params_bc=pde_params_bc,
-                    y_bc = y_bc,
-                    x_ic = x_ic,
-                    params_ic=pde_params_ic,
-                    y_ic = y_ic,
-                    x_distill = x_distill,
-                    params_distill=pde_params_distill,
-                    y_distill = y_distill,
-                    Dy_distill = Dy_distill,
-                    Hy_distill = D2y_distill,
-                    force_distill = force_distill,
-                    distill_on_actual_data = distill_on_actual_data,
-                    ewc_params = ewc_params,
-                    ewc_fisher_diag = ewc_fisher_diag,
-                    sys_mode = sys_mode,
-                    distill_mode = distill_mode,
-                    ewc_mode = ewc_mode
-                    )
-                loss.backward()
-                return loss
-            
-            # Call the optimizer
-            optim.step(closure=closure)
-        
-        # ----------------------------------- End of epoch -----------------------------------
-
-        # ------------------------------ Epoch evaluation ------------------------------
-
-        # Append the epoch time
-        stop_time = time.time()
-        epoch_time = stop_time-start_time
-        print(f'Epoch time: {epoch_time}')
-        stats_dict["train"]["times"].append(epoch_time)
-
-        if (step_prefix + step) % eval_every == 0:
-            model.eval()
-            with torch.no_grad():
-                for key, dataloader, bc_iter, ic_iter in [("train", train_dataloader, train_bc_iter, train_ic_iter), ("test", eval_dataloader, eval_bc_iter, eval_ic_iter)]:
-                    # Compute and average the loss over the test dataloader
-                    out_loss = 0.0
-                    der_loss = 0.0
-                    hes_loss = 0.0
-                    pde_loss = 0.0
-                    tot_loss = 0.0
-                    bc_loss = 0.0
-                    ic_loss = 0.0
-                    loss = 0.0
-
-                    for step, (data, bc_data, ic_data, distill_data) in enumerate(zip(dataloader, bc_iter, ic_iter, distill_iter)):
-                        step_prefix = epoch * len(dataloader)
-                        # Load batches from dataloaders
-                        x = data[0].to(device).float().requires_grad_(True)
-                        y = data[1].to(device).float()
-                        Dy = data[2].to(device).float()
-                        D2y = data[3].to(device).float()
-                        force = data[4].to(device).float()
-                        if with_pde_params:
-                            pde_params = data[5].to(device).float()
-                        else:
-                            pde_params = None
-
-                        if bc_data[0] is not None:
-                            x_bc = bc_data[0].to(device).float()
-                            y_bc = bc_data[1].to(device).float()
-                            if with_pde_params:
-                                pde_params_bc = bc_data[5].to(device).float()
-                            else:
-                                pde_params_bc = None
-                        else:
-                            x_bc = None
-                            y_bc = None
-                            pde_params_bc = None
-
-                        if ic_data[0] is not None:
-                            x_ic = ic_data[0].to(device).float()
-                            y_ic = ic_data[1].to(device).float()
-                            if with_pde_params:
-                                pde_params_ic = ic_data[5].to(device).float()
-                            else:
-                                pde_params_ic = None
-                        else:
-                            x_ic = None
-                            y_ic = None
-                            pde_params_ic = None
-
-                        # ---- Distill data ----
-                        if distill_data[0] is None:
-                            x_distill = None
-                            y_distill = None
-                            Dy_distill = None
-                            D2y_distill = None
-                            force_distill = None
-                            if distill_with_pde_params:
-                                pde_params_distill = distill_data[5].to(device).float()
-                            else:
-                                pde_params_distill = None
-                        else:
-                            x_distill = distill_data[0].to(device).float().requires_grad_(True)
-                            y_distill = distill_data[1].to(device).float().requires_grad_(True)
-                            Dy_distill = distill_data[2].to(device).float().requires_grad_(True)
-                            D2y_distill = distill_data[3].to(device).float().requires_grad_(True)
-                            force_distill = distill_data[4].to(device).float().requires_grad_(True)
-                            if distill_with_pde_params:
-                                pde_params_distill = distill_data[5].to(device).float()
-                            else:
-                                pde_params_distill = None
-
-                        loss += model.loss_fn(
-                            x_new = x,
-                            params_new = pde_params,
-                            y_new = y,
-                            Dy_new = Dy,
-                            Hy_new = D2y,
-                            force_new = force,
-                            x_bc = x_bc,
-                            params_bc = pde_params_bc,
-                            y_bc = y_bc,
-                            x_ic = x_ic,
-                            params_ic = pde_params_ic,
-                            y_ic = y_ic,
-                            x_distill = x_distill,
-                            params_distill = pde_params_distill,
-                            y_distill = y_distill,
-                            Dy_distill = Dy_distill,
-                            Hy_distill = D2y_distill,
-                            force_distill = force_distill,
-                            distill_on_actual_data = distill_on_actual_data,
-                            ewc_params = ewc_params,
-                            ewc_fisher_diag = ewc_fisher_diag,
-                            sys_mode = sys_mode,
-                            distill_mode = distill_mode,
-                            ewc_mode = ewc_mode
-                            ).item()
-
-                        # Evaluate the evaluation loss on test data
-                        out_loss_t, der_loss_t, hes_loss_t, pde_loss_t, bc_loss_t, ic_loss_t, tot_loss_t = model.eval_losses(
-                            x = x,
-                            params = pde_params,
-                            y = y,
-                            Dy = Dy,
-                            Hy = D2y,
-                            force = force,
-                            x_bc = x_bc,
-                            params_bc = pde_params_bc,
-                            y_bc = y_bc,
-                            x_ic = x_ic,
-                            params_ic = pde_params_ic,
-                            y_ic = y_ic,
-                            sys_mode = sys_mode
-                            )
-
-                        # Accumulate test loss values
-                        out_loss += out_loss_t.item()
-                        der_loss += der_loss_t.item()
-                        hes_loss += hes_loss_t.item()
-                        pde_loss += pde_loss_t.item()
-                        tot_loss += tot_loss_t.item()
-                        bc_loss += bc_loss_t.item()
-                        ic_loss += ic_loss_t.item()
-
-                    # Average
-                    loss /= len(dataloader)
-                    out_loss /= len(dataloader)
-                    der_loss /= len(dataloader)
-                    hes_loss /= len(dataloader)
-                    pde_loss /= len(dataloader)
-                    bc_loss /= len(dataloader)
-                    ic_loss /= len(dataloader)
-                    tot_loss /= len(dataloader)
-
-                    # Append test loss average values
-                    stats_dict[key]["step_list"].append(step_prefix + step)
-                    stats_dict[key]["tot_losses"].append(tot_loss)
-                    stats_dict[key]["out_losses"].append(out_loss)
-                    stats_dict[key]["der_losses"].append(der_loss)
-                    stats_dict[key]["hes_losses"].append(hes_loss)
-                    stats_dict[key]["pde_losses"].append(pde_loss)
-                    stats_dict[key]["bc_losses"].append(bc_loss)
-                    stats_dict[key]["ic_losses"].append(ic_loss)
-                    stats_dict[key]["losses"].append(loss)
-
-                    #print(f"Average output loss: {out_loss}")
-                    #print(f"Average derivative loss: {der_loss}")
-                    #print(f"Average hessian loss: {hes_loss}")
-                    #print(f"Average PDE loss: {pde_loss}")
-                    #print(f"Average bc loss: {bc_loss}")
-                    #print(f"Average ic loss: {ic_loss}")
-                    print(f"Average {key} loss: {loss}")
-
-                # Report intermediate result to Optuna
-                trial.report(stats_dict["test"]["losses"][-1], step=epoch)
-        
-                # Check if the trial should be pruned
-                if trial.should_prune():
-                    raise optuna.exceptions.TrialPruned()
-
-    return stats_dict
-# ==============================================================================================================
-
-# Function to get value, prioritizing config file > default
+# ============================================ Function to get value ============================================
 def get_param(config_section_dict, config_key, default_val=None, type_func=None):
     # Try to get from config file
     if config_section_dict and config_key in config_section_dict:
@@ -401,469 +45,994 @@ def get_param(config_section_dict, config_key, default_val=None, type_func=None)
     else:
         return default_val
 
-class Objective:
-    def __init__(
-            self,
-            seed,
-            starting_model,
-            pde_name,
-            pde_params,
-            with_pde_params,
-            sys_mode,
-            distill_mode,
-            ewc_mode,
-            ewc_params,
-            ewc_fisher_diag,
-            input_units,
-            layers,
-            train_steps,
-            epochs,
-            optim,
-            eval_every,
-            device,
-            train_dataset,
-            eval_dataset,
-            train_bc_dataset,
-            train_ic_dataset,
-            eval_bc_dataset,
-            eval_ic_dataset,
-            distill_dataset,
-            distill_on_actual_data,
-            distill_with_pde_params,
-            batch_size_list,
-            lr_init_list,
-            phy_weight_interval,
-            bc_weight_interval,
-            ic_weight_interval,
-            distill_weight_interval,
-            ewc_weight_interval,
-            models_dir):
-        self.seed = seed
-        self.starting_model = starting_model
-        self.pde_name = pde_name
-        self.pde_params = pde_params
-        self.with_pde_params = with_pde_params
-        self.sys_mode = sys_mode
-        self.distill_mode = distill_mode
-        self.ewc_mode = ewc_mode
-        self.ewc_params = ewc_params
-        self.ewc_fisher_diag = ewc_fisher_diag
-        self.input_units = input_units
-        self.layers = layers
-        self.train_steps = train_steps
-        self.epochs = epochs
-        self.optimizer = optim
-        self.eval_every = eval_every
-        self.device = device
-        self.train_dataset = train_dataset
-        self.eval_dataset = eval_dataset
-        self.train_bc_dataset = train_bc_dataset
-        self.train_ic_dataset = train_ic_dataset
-        self.eval_bc_dataset = eval_bc_dataset
-        self.eval_ic_dataset = eval_ic_dataset
-        self.distill_dataset = distill_dataset
-        self.distill_on_actual_data = distill_on_actual_data
-        self.distill_with_pde_params = distill_with_pde_params
-        self.batch_size_list = batch_size_list
-        self.lr_init_list = lr_init_list
-        self.phy_weight_interval = phy_weight_interval
-        self.bc_weight_interval = bc_weight_interval
-        self.ic_weight_interval = ic_weight_interval
-        self.distill_weight_interval = distill_weight_interval
-        self.ewc_weight_interval = ewc_weight_interval
-        self.activation = torch.nn.Tanh()
-        self.models_dir = models_dir
-        self.models = []
-        
-        
-    def __call__(self, trial):
-        # Define hyperparameters to optimize
-        phy_weight = trial.suggest_float("phy_weight", self.phy_weight_interval[0], self.phy_weight_interval[1], log=True)
-
-        bc_weight = trial.suggest_float("bc_weight", self.bc_weight_interval[0], self.bc_weight_interval[1], log=True)
-
-        ic_weight = trial.suggest_float("ic_weight", self.ic_weight_interval[0], self.ic_weight_interval[1], log=True)
-
-        distill_weight = trial.suggest_float("distill_weight", self.distill_weight_interval[0], self.distill_weight_interval[1], log=True)
-        
-        ewc_weight = trial.suggest_float("ewc_weight", self.ewc_weight_interval[0], self.ewc_weight_interval[1], log=True)
-        self.batch_size = trial.suggest_categorical("batch_size", self.batch_size_list)
-        lr_init = trial.suggest_categorical("lr_init", self.lr_init_list)
-
-        # Seed
-        torch.manual_seed(self.seed)
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        gen = torch.Generator()
-        gen.manual_seed(self.seed)
-
-        # Load data and build dataloaders
-        train_dataloader = DataLoader(self.train_dataset, self.batch_size, generator=gen, shuffle=True)
-
-        eval_dataloader = DataLoader(self.eval_dataset, self.batch_size, generator=gen, shuffle=True)
-
-        if self.train_bc_dataset == None:
-            train_bc_dataloader = None
+# =============================================== Run configuration ===============================================
+def start_train(config: dict|str, **kwargs):
+    if type(config) is str:
+        # Load configuration from YAML file
+        config_dict = {}
+        if os.path.exists(config):
+            with open(config, 'r') as f:
+                config_dict = yaml.safe_load(f)
         else:
-            train_bc_dataloader = DataLoader(self.train_bc_dataset, self.batch_size, generator=gen, shuffle=True)
-
-        if self.train_ic_dataset == None:
-            train_ic_dataloader = None
-        else:
-            train_ic_dataloader = DataLoader(self.train_ic_dataset, self.batch_size, generator=gen, shuffle=True)
-
-        if self.eval_bc_dataset == None:
-            eval_bc_dataloader = None
-        else:
-            eval_bc_dataloader = DataLoader(self.eval_bc_dataset, self.batch_size, generator=gen, shuffle=True)
-
-        if self.eval_ic_dataset == None:
-            eval_ic_dataloader = None
-        else:
-            eval_ic_dataloader = DataLoader(self.eval_ic_dataset, self.batch_size, generator=gen, shuffle=True)        
-
-        if self.distill_dataset == None:
-            distill_dataloader = None
-        else:
-            distill_dataloader = DataLoader(self.distill_dataset, self.batch_size, generator=gen, shuffle=True)
-
-
-        # NN activation function
-
-        # Model init
-        if self.starting_model is None:
-            model = PdeNet(
-                pde=Pde(name=self.pde_name, params=self.pde_params),
-                bc_weight=bc_weight,
-                ic_weight=ic_weight,
-                phy_weight=phy_weight,
-                distill_weight=distill_weight,
-                ewc_weight=ewc_weight,
-                input_units=self.input_units,
-                hidden_units=self.layers,
-                lr_init=lr_init,
-                device=self.device,
-                activation=self.activation,    
-                last_activation=False
-            ).to(self.device)
-        else:
-            model = resume_model(model_path=self.starting_model, device=self.device)
-
-        # Optimizer
-        if self.optimizer == "LBFGS":
-            optim = LBFGS(params=model.parameters(), lr=lr_init)
-        else:
-            optim = Adam(params=model.parameters(), lr=lr_init)
-
-        stats_dict = train_loop(
-            model = model,
-            with_pde_params = self.with_pde_params,
-            train_steps = self.train_steps,
-            epochs = self.epochs,
-            optim = optim,
-            sys_mode = self.sys_mode,
-            distill_mode = self.distill_mode,
-            ewc_mode = self.ewc_mode,
-            ewc_params = self.ewc_params,
-            ewc_fisher_diag = self.ewc_fisher_diag,
-            train_dataloader = train_dataloader,
-            train_bc_dataloader = train_bc_dataloader,
-            train_ic_dataloader = train_ic_dataloader,
-            eval_dataloader = eval_dataloader,
-            eval_bc_dataloader = eval_bc_dataloader,
-            eval_ic_dataloader = eval_ic_dataloader,
-            distill_dataloader = distill_dataloader,
-            distill_on_actual_data = self.distill_on_actual_data,
-            distill_with_pde_params = self.distill_with_pde_params,
-            device = self.device,
-            eval_every = eval_every,
-            trial = trial
-            )
-
-        torch.cuda.empty_cache()
-
-        # Put the model in evaluation mode
-        model.eval()
-
-        name = f"trial{trial.number}"
-        os.makedirs(f"{self.models_dir}/{name}", exist_ok=True)
-
-        self.save_model(model=model, name=name)
-        self.save_stats(stats_dict=stats_dict, key="train", name=name)
-        self.save_stats(stats_dict=stats_dict, key="test", name=name)
-
-        return stats_dict["test"]["out_losses"][-1]
-
-    def save_model(self, model: PdeNet, name: str):
-        # Save the model
-        # Create a dictionary to save both the model's state_dict and its architectural parameters
-        checkpoint = {
-            'model_state_dict': model.state_dict(),
-            'pde': self.pde_name,
-            'pde_params': self.pde_params,
-            'input_units': model.input_units,
-            'hidden_units': model.hidden_units,
-            'lr_init': model.lr_init,
-            'batch_size': self.batch_size,
-            'bc_weight': model.bc_weight,
-            'ic_weight': model.ic_weight,
-            'phy_weight': model.phy_weight,
-            'distill_weight': model.distill_weight,
-            'ewc_weight': model.ewc_weight,
-            'activation': model.activation
-        }
-
-        # Save the checkpoint dictionary
-        torch.save(checkpoint, f"{self.models_dir}/{name}/model.pth")
-    
-    def save_stats(self, stats_dict: dict, key: str, name: str):
-        curves = []
-        
-        curves.append(torch.tensor(stats_dict[key]["step_list"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["tot_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["out_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["der_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["hes_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["pde_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["bc_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["ic_losses"]).cpu().numpy())
-        curves.append(torch.tensor(stats_dict[key]["losses"]).cpu().numpy())
-        if key == "train":
-            curves.append(torch.tensor(stats_dict[key]["times"]).cpu().numpy())
-
-        # Stack loss curves
-        stacked_curves = np.column_stack(curves)
-
-        # Save loss curves
-        with open(f'{self.models_dir}/{name}/{key}_stats.npy', 'wb') as f:
-            np.save(f, stacked_curves)
-
-
-# =================================================================================================================
-
-if __name__ == "__main__":
-    # Init parser for command-line arguments
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--config', default='config.yaml', type=str, help='Path to the configuration file (YAML)')
-
-    # Parse command-line arguments
-    cli_args = parser.parse_args()
-
-    # Load configuration from YAML file
-    config_params = {}
-    if os.path.exists(cli_args.config):
-        with open(cli_args.config, 'r') as f:
-            config_params = yaml.safe_load(f)
+            raise ValueError(f"Config file '{config}' not found.")
     else:
-        print(f"Warning: Config file '{cli_args.config}' not found. Using default arguments.")
+        config_dict = config
 
-    # Extract parameters from config_params
 
     # Get config sections
-    training_config = config_params.get('training', {})
-    hyperparams_config = config_params.get('hyperparams', {})
-    paths_config = config_params.get('paths', {})
-
     # PDE considered
-    pde_name = get_param(training_config, 'pde', default_val='Allen-Cahn')
-    pde_params = [float(p) for p in get_param(training_config, 'pde_params', default_val=[0.0], type_func=list)]
+    pde_name = get_param(config_dict, "PDE", type_func=str)
+    if pde_name is None:
+        raise ValueError("Missing PDE information.")
+    
+    actual_dict     = config_dict.get("Actual", {})
+    unlabeled_dict  = config_dict.get("Unlabeled", {})
+    distill_dict    = config_dict.get("Distillation", {})
+    ewc_dict        = config_dict.get("EWC", {})
+    dwa_dict        = config_dict.get("DWA", {})
 
-    # Training mode
-    sys_mode = get_param(training_config, 'sys_mode', default_val='PINN')
-    distill_mode = get_param(training_config, 'distill_mode', default_val='Forgetting')
-    ewc_mode = get_param(training_config, 'ewc_mode', default_val='Off')
+    actual_mode                 = get_param(actual_dict, "mode", default_val="Output")
+    actual_model                = get_param(actual_dict, "model", default_val="") # path
+    layers                      = [int(layer) for layer in get_param(actual_dict, "layers", default_val=[50, 50, 50, 50], type_func=list)]
+    time_in_input               = get_param(actual_dict, "time_in_input", default_val=False, type_func=bool)
+    space_in_input              = get_param(actual_dict, "space_in_input", default_val=True, type_func=bool)
+    fourier_features            = get_param(actual_dict, "fourier_features", default_val=-1)
+    frequency_variance          = get_param(actual_dict, "frequency_variance", default_val=1.0)
+    pde_params_to_take_keys     = get_param(actual_dict, "pde_params_in_input", default_val=[], type_func=list)
+    ic_params_to_take_keys      = get_param(actual_dict, "ic_params_in_input", default_val=[], type_func=list)
+    train_dataset_path          = get_param(actual_dict, "train_dataset", default_val="") # path
+    val_dataset_path            = get_param(actual_dict, "val_dataset", default_val="") # path
+    actual_subset               = get_param(actual_dict, "subset", default_val={})
+    actual_shape                = get_param(actual_dict, "shape", default_val={"shape": "rectangle", "cell_size": None, "center": None, "radius": None})
+    boundary_mode               = get_param(actual_dict, "boundary")
+    bc_mode                     = get_param(actual_dict, "BC", type_func=str, default_val="Dirichlet")
+    pde_at_bd                   = get_param(actual_dict, "pde_at_bd", type_func=bool, default_val=True)
+    pde_at_t0                   = get_param(actual_dict, "pde_at_t0", type_func=bool, default_val=True)
+    initial_time_mode           = get_param(actual_dict, "initial_time") # Excluded, Separated, Joined
+    actual_importance           = get_param(actual_dict, "importance", default_val=1.0)
+    actual_bc_importance        = get_param(actual_dict, "bc_importance", default_val=1.0)
+    actual_ic_importance        = get_param(actual_dict, "ic_importance", default_val=1.0)
+    actual_bc_weight            = get_param(actual_dict, "bc_weight", default_val=1.0, type_func=float)
+    actual_ic_weight            = get_param(actual_dict, "ic_weight", default_val=1.0, type_func=float)
+    actual_out_weight           = get_param(actual_dict, "out_weight", default_val=1.0, type_func=float)
+    actual_der_weight           = get_param(actual_dict, "der_weight", default_val=1.0, type_func=float)
+    actual_derx_weight           = get_param(actual_dict, "derx_weight", default_val=1.0, type_func=float)
+    actual_dert_weight           = get_param(actual_dict, "dert_weight", default_val=1.0, type_func=float)
+    actual_hes_weight           = get_param(actual_dict, "hes_weight", default_val=1.0, type_func=float)
+    actual_hesx_weight           = get_param(actual_dict, "hesx_weight", default_val=1.0, type_func=float)
+    actual_hest_weight           = get_param(actual_dict, "hest_weight", default_val=1.0, type_func=float)
+    actual_res_weight           = get_param(actual_dict, "res_weight", default_val=1.0, type_func=float)
+    monitor_conflicts           = get_param(actual_dict, "monitor_conflicts", default_val=False, type_func=bool)
+    
+    nl_dataset_path         = get_param(unlabeled_dict, "dataset", default_val="") # path
+    nl_subset               = get_param(unlabeled_dict, "subset", default_val={})
+    memory_buffer_size_nl   = get_param(unlabeled_dict, "buffer_size", default_val=None)
+    memory_buffer_size_nl_bc   = get_param(unlabeled_dict, "buffer_size_bc", default_val=None)
+    memory_buffer_size_nl_ic   = get_param(unlabeled_dict, "buffer_size_ic", default_val=None)
+    nl_importance           = get_param(unlabeled_dict, "importance", default_val=1.0)
+    nl_weight               = get_param(unlabeled_dict, "weight", default_val=1.0, type_func=float)
+    nl_bc_importance        = get_param(unlabeled_dict, "bc_importance", default_val=1.0)
+    nl_ic_importance        = get_param(unlabeled_dict, "ic_importance", default_val=1.0)
+    nl_bc_weight            = get_param(unlabeled_dict, "bc_weight", default_val=1.0, type_func=float)
+    nl_ic_weight            = get_param(unlabeled_dict, "ic_weight", default_val=1.0, type_func=float)
+    nl_shape                = get_param(unlabeled_dict, "shape", default_val={"shape": "rectangle", "cell_size": None, "center": None, "radius": None})
+    boundary_mode_nl        = get_param(unlabeled_dict, "boundary")
+    initial_time_mode_nl    = get_param(unlabeled_dict, "initial_time")
 
-    # Architecture
-    input_units = get_param(hyperparams_config, 'input_units', default_val=2, type_func=int)  
-    with_pde_params = get_param(training_config, 'with_pde_params', default_val=False, type_func=bool)
-    str_layers = get_param(hyperparams_config, 'layers', default_val=[50, 50, 50, 50], type_func=list)
-    layers = [int(layer) for layer in str_layers]
-    pruner = get_param(hyperparams_config, 'pruner', default_val='median', type_func=str)
-    threshold = get_param(hyperparams_config, 'threshold', default_val=1.0, type_func=float)
-    n_warmup_steps = get_param(hyperparams_config, 'n_warmup_steps', default_val=0, type_func=int)
-    n_trials = get_param(hyperparams_config, 'n_trials', default_val=10, type_func=int)
-    optim = get_param(hyperparams_config, 'optimizer', default_val='Adam', type_func=str)
+    distill_mode                = get_param(distill_dict, "mode", default_val="Forgetting")
+    distill_model               = get_param(distill_dict, "model", default_val="") # path
+    distill_dataset_path        = get_param(distill_dict, "dataset", default_val="") # path
+    distill_subset              = get_param(distill_dict, "subset", default_val={})
+    memory_buffer_size_distill  = get_param(distill_dict, "buffer_size", default_val=None)
+    distill_importance          = get_param(distill_dict, "importance", default_val=1.0)
+    distill_out_weight          = get_param(distill_dict, "out_weight", default_val=1.0, type_func=float)
+    distill_der_weight          = get_param(distill_dict, "der_weight", default_val=1.0, type_func=float)
+    distill_derx_weight          = get_param(distill_dict, "derx_weight", default_val=1.0, type_func=float)
+    distill_dert_weight          = get_param(distill_dict, "dert_weight", default_val=1.0, type_func=float)
+    distill_hes_weight          = get_param(distill_dict, "hes_weight", default_val=1.0, type_func=float)
+    distill_hesx_weight          = get_param(distill_dict, "hesx_weight", default_val=1.0, type_func=float)
+    distill_hest_weight          = get_param(distill_dict, "hest_weight", default_val=1.0, type_func=float)
 
-    # Learning
-    train_steps = get_param(training_config, 'train_steps', default_val=-1, type_func=int)
-    epochs = get_param(training_config, 'epochs', default_val=100, type_func=int)
-    eval_every = get_param(training_config, 'eval_every', default_val=100, type_func=int)
+    ewc_mode                = get_param(ewc_dict, "mode", default_val="Off")
+    ewc_model               = get_param(ewc_dict, "model", default_val="") # path
+    ewc_dataset_path        = get_param(ewc_dict, "dataset", default_val="") # path
+    ewc_subset              = get_param(ewc_dict, "subset", default_val={})
+    memory_buffer_size_ewc  = get_param(ewc_dict, "buffer_size", default_val=None)
+    ewc_importance          = get_param(ewc_dict, "importance", default_val=1.0)
+    ewc_weight              = get_param(ewc_dict, "weight", default_val=1.0, type_func=float)
+    ewc_auto_weighting      = get_param(ewc_dict, "auto_weighting", default_val=False, type_func=bool)
+    ewc_warm_up             = get_param(ewc_dict, "warm_up", default_val=0, type_func=int)
+    ewc_decay_factor        = get_param(ewc_dict, "decay", default_val=1.0)
+    ewc_src_fisher_file     = get_param(ewc_dict, "src_fisher_diag_file", default_val="")
+    ewc_dst_fisher_file     = get_param(ewc_dict, "dst_fisher_diag_file", default_val="")
+    ewc_moving_avg_factor   = get_param(ewc_dict, "moving_avg_factor", default_val=0.5, type_func=float)
 
-    # Seed
-    seed = get_param(training_config, 'seed', default_val=42, type_func=int)
+    dwa_mode                    = get_param(dwa_dict, "mode", default_val="Off") # Off, Std, Norm1, NormK
+    dwa_moving_avg_factor       = get_param(dwa_dict, "moving_avg_factor", default_val=0.9, type_func=float)
+    dwa_moving_avg_frequency    = get_param(dwa_dict, "moving_avg_frequency", default_val=1, type_func=int)
+    dwa_warm_up                 = get_param(dwa_dict, "warm_up", default_val=0, type_func=int)
+    delayed_weights             = get_param(dwa_dict, "delayed_weights", type_func=bool, default_val=False)
+    
+    pruner              = get_param(config_dict, "pruner", default_val="median", type_func=str)
+    threshold           = get_param(config_dict, "threshold", default_val=1.0, type_func=float)
+    n_warmup_steps      = get_param(config_dict, "n_warmup_steps", default_val=0, type_func=int)
+    n_trials            = get_param(config_dict, "n_trials", default_val=10, type_func=int)
+    train_steps         = get_param(config_dict, "train_steps", default_val=-1, type_func=int)
+    epochs              = get_param(config_dict, "epochs", default_val=100, type_func=int)
+    early_stop_value    = get_param(config_dict, "early_stop_value", default_val=None, type_func=float)
+    eval_every          = get_param(config_dict, "eval_every", default_val=1, type_func=int)
+    seed                = get_param(config_dict, "seed", default_val=42, type_func=int)
+    device              = get_param(config_dict, "device", default_val="cpu") #cuda:0
+    lr_init             = get_param(config_dict, "learning_rate")
+    scheduler           = get_param(config_dict, "scheduler", type_func=str, default_val=None)
+    batch_size          = get_param(config_dict, "batch_size")
+    clip_grad           = get_param(config_dict, "clip_grad", type_func=bool, default_val=True)
+    models_dir          = get_param(config_dict, "models_dir", default_val=f"./{pde_name.replace('-', '')}/models")
+    suggestions         = get_param(config_dict, "suggestions", default_val="On")
+
+    train_dataset   = kwargs.get("train_dataset")
+    val_dataset     = kwargs.get("val_dataset")
+    nl_dataset      = kwargs.get("nl_dataset")
+    distill_dataset = kwargs.get("distill_dataset")
+    ewc_dataset     = kwargs.get("ewc_dataset")
+
+    if train_dataset is None: train_dataset = train_dataset_path
+    if val_dataset is None: val_dataset = val_dataset_path
+    if nl_dataset is None: nl_dataset = nl_dataset_path
+    if distill_dataset is None: distill_dataset = distill_dataset_path
+    if ewc_dataset is None: ewc_dataset = ewc_dataset_path
+
+    layers                  = get_param(kwargs, "layers", default_val=layers, type_func=list)
+    time_in_input           = get_param(kwargs, "time_in_input", default_val=time_in_input, type_func=bool)
+    space_in_input          = get_param(kwargs, "space_in_input", default_val=space_in_input, type_func=bool)
+    fourier_features        = get_param(kwargs, "fourier_features", default_val=fourier_features, type_func=int)
+    frequency_variance      = get_param(kwargs, "frequency_variance", default_val=frequency_variance, type_func=float)
+    pde_params_to_take_keys = get_param(kwargs, "pde_params", default_val=pde_params_to_take_keys)
+    ic_params_to_take_keys  = get_param(kwargs, "ic_params", default_val=ic_params_to_take_keys)
+
+    actual_model            = get_param(kwargs, "actual_model", default_val=actual_model)
+    distill_model           = get_param(kwargs, "distill_model", default_val=distill_model)
+    ewc_model               = get_param(kwargs, "ewc_model", default_val=ewc_model)
+
+    pruner                  = get_param(kwargs, "pruner", default_val=pruner)
+    threshold               = get_param(kwargs, "threshold", default_val=threshold)
+    n_warmup_steps          = get_param(kwargs, "n_warmup_steps", n_warmup_steps)
+    n_trials                = get_param(kwargs, "n_trials", default_val=n_trials)
+    train_steps             = get_param(kwargs, "train_steps", default_val=train_steps)
+    epochs                  = get_param(kwargs, "epochs", default_val=epochs)
+    early_stop_value        = get_param(kwargs, "early_stop_value", default_val=early_stop_value)
+    ewc_decay_factor        = get_param(kwargs, "ewc_decay", default_val=ewc_decay_factor)
+    eval_every              = get_param(kwargs, "eval_every", default_val=eval_every)
+    seed                    = get_param(kwargs, "seed", default_val=seed)
+    device                  = get_param(kwargs, "device", default_val=device)
+    lr_init                 = get_param(kwargs, "lr_init", default_val=lr_init)
+    scheduler               = get_param(kwargs, "scheduler", default_val=scheduler)
+    batch_size              = get_param(kwargs, "batch_size", default_val=batch_size)
+    clip_grad               = get_param(kwargs, "clip_grad", default_val=clip_grad)
+    models_dir              = get_param(kwargs, "models_dir", default_val=models_dir)
+    suggestions             = get_param(kwargs, "suggestions", default_val=suggestions)
+
+    actual_subset           = get_param(kwargs, "actual_subset", default_val=actual_subset)
+    actual_shape            = get_param(kwargs, "actual_shape", default_val=actual_shape)
+
+    nl_subset               = get_param(kwargs, "nl_subset", default_val=nl_subset)
+    nl_shape                = get_param(kwargs, "nl_shape", default_val=nl_shape)
+
+    distill_subset          = get_param(kwargs, "distill_subset", default_val=distill_subset)
+    ewc_subset              = get_param(kwargs, "ewc_subset", default_val=ewc_subset)
+
+    memory_buffer_size_nl       = get_param(kwargs, "nl_buffer_size", default_val=memory_buffer_size_nl)
+    memory_buffer_size_nl_bc       = get_param(kwargs, "nl_buffer_size_bc", default_val=memory_buffer_size_nl_bc)
+    memory_buffer_size_nl_ic       = get_param(kwargs, "nl_buffer_size_ic", default_val=memory_buffer_size_nl_ic)
+    memory_buffer_size_distill  = get_param(kwargs, "distill_buffer_size", default_val=memory_buffer_size_distill)
+    memory_buffer_size_ewc      = get_param(kwargs, "ewc_buffer_size", default_val=memory_buffer_size_ewc)
+
+    actual_mode             = get_param(kwargs, "actual_mode", default_val=actual_mode)
+    distill_mode            = get_param(kwargs, "distill_mode", default_val=distill_mode)
+    ewc_mode                = get_param(kwargs, "ewc_mode", default_val=ewc_mode)
+    dwa_mode                = get_param(kwargs, "dwa_mode", default_val=dwa_mode)
+    boundary_mode           = get_param(kwargs, "boundary_mode", default_val=boundary_mode)
+    bc_mode                 = get_param(kwargs, "bc_mode", default_val=bc_mode)
+    initial_time_mode       = get_param(kwargs, "initial_time", default_val=initial_time_mode) # Excluded, Separated, Joined
+    boundary_mode_nl           = get_param(kwargs, "boundary_mode_nl", default_val=boundary_mode_nl)
+    initial_time_mode_nl       = get_param(kwargs, "initial_time_nl", default_val=initial_time_mode_nl)
+    pde_at_bd               = get_param(kwargs, "pde_at_bd", default_val=pde_at_bd)
+    pde_at_t0               = get_param(kwargs, "pde_at_t0", default_val=pde_at_t0)
+    
+
+    dwa_warm_up                 = get_param(kwargs, "dwa_warm_up", default_val=dwa_warm_up)
+    dwa_moving_avg_factor       = get_param(kwargs, "dwa_moving_avg_factor", default_val=dwa_moving_avg_factor)
+    dwa_moving_avg_frequency    = get_param(kwargs, "dwa_moving_avg_frequency", default_val=dwa_moving_avg_frequency)
+    delayed_weights             = get_param(kwargs, "delayed_weights", default_val=delayed_weights)
+    
+    ewc_src_fisher_file     = get_param(kwargs, "ewc_src_fisher_file", default_val=ewc_src_fisher_file)
+    ewc_dst_fisher_file     = get_param(kwargs, "ewc_dst_fisher_file", default_val=ewc_dst_fisher_file)
+    ewc_moving_avg_factor   = get_param(kwargs, "ewc_moving_avg_factor", default_val=ewc_moving_avg_factor)
+
+    actual_importance       = get_param(kwargs, "importance", default_val=actual_importance)
+    actual_bc_importance    = get_param(kwargs, "bc_importance", default_val=actual_bc_importance)
+    actual_ic_importance    = get_param(kwargs, "ic_importance", default_val=actual_ic_importance)
+    distill_importance      = get_param(kwargs, "distill_importance", default_val=distill_importance)
+    nl_importance           = get_param(kwargs, "nl_importance", default_val=nl_importance)
+    nl_bc_importance        = get_param(kwargs, "nl_bc_importance", default_val=nl_bc_importance)
+    nl_ic_importance        = get_param(kwargs, "nl_ic_importance", default_val=nl_ic_importance)
+    ewc_importance          = get_param(kwargs, "ewc_importance", default_val=ewc_importance)
+
+    actual_res_weight           = get_param(kwargs, "res_weight", default_val=actual_res_weight)
+    actual_out_weight           = get_param(kwargs, "out_weight", default_val=actual_out_weight)
+    actual_der_weight           = get_param(kwargs, "der_weight", default_val=actual_der_weight)
+    actual_derx_weight           = get_param(kwargs, "derx_weight", default_val=actual_derx_weight)
+    actual_dert_weight           = get_param(kwargs, "dert_weight", default_val=actual_dert_weight)
+    actual_hes_weight           = get_param(kwargs, "hes_weight", default_val=actual_hes_weight)
+    actual_hesx_weight           = get_param(kwargs, "hesx_weight", default_val=actual_hesx_weight)
+    actual_hest_weight           = get_param(kwargs, "hest_weight", default_val=actual_hest_weight)
+    actual_bc_weight            = get_param(kwargs, "bc_weight", default_val=actual_bc_weight)
+    actual_ic_weight            = get_param(kwargs, "ic_weight", default_val=actual_ic_weight)
+    monitor_conflicts           = get_param(kwargs, "monitor_conflicts", default_val=monitor_conflicts)
+
+    if lr_init is None or (type(lr_init) is list and lr_init == []):
+        lr_init = [1e-3]
+    if type(lr_init) is list:
+        lr_init = [float(el) for el in lr_init]
+    else:
+        lr_init = [float(lr_init)]
+    
+    if batch_size is None or (type(batch_size) is list and batch_size == []):
+        batch_size = [1024]
+    if type(batch_size) is list:
+        batch_size = [int(el) for el in batch_size]
+    else:
+        batch_size = [int(batch_size)]
+
+    if fourier_features is None or (type(fourier_features) is list and fourier_features == []):
+        fourier_features = [-1]
+    if type(fourier_features) is list:
+        fourier_features = [int(el) for el in fourier_features]
+    else:
+        fourier_features = [int(fourier_features)]
+    
+    if frequency_variance is None or (type(frequency_variance) is list and frequency_variance == []):
+        frequency_variance = [1.0]
+    if type(frequency_variance) is not list:
+        frequency_variance = [frequency_variance]
+    
+    if scheduler == "":
+        scheduler = None
+    
+    if scheduler is None:
+        if actual_mode == "Output":
+            scheduler = False
+        else:
+            scheduler = True
+    
+    importances = []
+    for imp in [actual_importance, actual_bc_importance, actual_ic_importance, nl_importance, nl_bc_importance, nl_ic_importance, distill_importance, ewc_importance]:
+        if imp is None or (type(imp) is list and imp == []):
+            imp = [1.0]
+        if type(imp) is list:
+            imp = [float(i) for i in imp]
+        else:
+            imp = [float(imp)]
+        importances.append(imp)
+    
+    actual_importance = importances[0]
+    actual_bc_importance = importances[1]
+    actual_ic_importance = importances[2]
+    nl_importance = importances[3]
+    nl_bc_importance = importances[4]
+    nl_ic_importance = importances[5]
+    distill_importance = importances[6]
+    ewc_importance = importances[7]
+    
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
     gen = torch.Generator()
     gen.manual_seed(seed)
 
-    # Device
-    device = get_param(training_config, 'device', default_val='cpu') #cuda:0
+    # Loading datasets
 
-    # Experiment name
-    experiment_name = get_param(training_config, 'experiment_name', default_val='grid')
+    if type(actual_subset) is dict:
+        actual_subset = [actual_subset]
+    if type(nl_subset) is dict:
+        nl_subset = [nl_subset]
+    if type(distill_subset) is dict:
+        distill_subset = [distill_subset]
+    if type(ewc_subset) is dict:
+        ewc_subset = [ewc_subset]
+
+    if actual_shape["shape"] == "rectangle":
+        actual_shape["cell_size"] = None
+        actual_shape["center"] = None
+        actual_shape["radius"] = None
+    elif actual_shape["shape"] == "circle":
+        if "cell_size" not in actual_shape.keys():
+            raise ValueError(f"Missing argument 'cell_size' for domain shape 'circle'.")
+        if "center" not in actual_shape.keys():
+            raise ValueError(f"Missing argument 'center' for domain shape 'circle'.")
+        if "radius" not in actual_shape.keys():
+            raise ValueError(f"Missing argument 'radius' for domain shape 'circle'.")
+    else:
+        raise ValueError(f"Not valid shape '{actual_shape['shape']}'.")
+    
+    if nl_shape["shape"] == "rectangle":
+        nl_shape["cell_size"] = None
+        nl_shape["center"] = None
+        nl_shape["radius"] = None
+    elif nl_shape["shape"] == "circle":
+        if "cell_size" not in nl_shape.keys():
+            raise ValueError(f"Missing argument 'cell_size' for domain shape 'circle'.")
+        if "center" not in nl_shape.keys():
+            raise ValueError(f"Missing argument 'center' for domain shape 'circle'.")
+        if "radius" not in nl_shape.keys():
+            raise ValueError(f"Missing argument 'radius' for domain shape 'circle'.")
+    else:
+        raise ValueError(f"Not valid shape '{nl_shape['shape']}'.")
+
+    if type(train_dataset) is str:
+        if train_dataset == "":
+            raise ValueError("Required train_dataset arg not specified.")
+        if not os.path.exists(train_dataset):
+            raise ValueError(f"Dataset file '{train_dataset}' not found.")
+        train_dataset = torch.load(train_dataset, weights_only=False)
+
+    #if input_units is None:
+    input_units = space_in_input * len(train_dataset.datasets[0][0][X]) + time_in_input + len(pde_params_to_take_keys) + len(ic_params_to_take_keys)
+    if type(val_dataset) is str:
+        if val_dataset == "":
+            val_dataset = None
+        elif not os.path.exists(val_dataset):
+            raise ValueError(f"Dataset file '{val_dataset}' not found.")
+        else:
+            val_dataset = torch.load(val_dataset, weights_only=False)
+
+    t = actual_subset[0].get("t")
+    t_points = actual_subset[0].get("t_points")
+    if t is None:
+        t = [0, len(train_dataset.datasets)-1]
+    if t_points is None:
+        t_points = np.arange(start=t[0], stop=t[1]+1, step=1)
+    else:
+        t_points = [i for i in t_points if i >= t[0] and i <= t[1]]
+
+    if initial_time_mode is None or len(train_dataset.datasets) == 1:
+        if actual_mode == "Output" or len(train_dataset.datasets) == 1:
+            initial_time_mode = "Joined"
+        else:
+            raise ValueError("Missing initial mode.")
+    if initial_time_mode == "Excluded":
+        t_points = t_points[1:]
+        train_initial = None
+        val_initial = None
+        train_dataset = extract_TensorDataset(train_dataset, time_indexes=t_points[1:], spatial_ranges=actual_subset)
+        val_dataset = extract_TensorDataset(val_dataset, time_indexes=t_points[1:], spatial_ranges=actual_subset)
+    elif initial_time_mode == "Joined":
+        train_initial = None
+        val_initial = None
+        train_dataset = extract_TensorDataset(train_dataset, time_indexes=t_points, spatial_ranges=actual_subset)
+        val_dataset = extract_TensorDataset(val_dataset, time_indexes=t_points, spatial_ranges=actual_subset)
+    else: # initial_time_mode == "Separated"
+        train_initial = extract_TensorDataset(train_dataset, time_indexes=[t_points[0]], spatial_ranges=actual_subset)
+        val_initial = extract_TensorDataset(val_dataset, time_indexes=[t_points[0]], spatial_ranges=actual_subset)
+        
+        # train_dataset_list = train_dataset.datasets
+        # train_dataset_list[0] = extract_interior(train_dataset_list[0])
+        # train_dataset = ConcatDataset(train_dataset_list)
+
+        # val_dataset_list = train_dataset.datasets
+        # val_dataset_list[0] = extract_interior(val_dataset_list[0])
+        # val_dataset = ConcatDataset(val_dataset_list)
+
+        if pde_at_t0:
+            train_dataset = extract_TensorDataset(train_dataset, time_indexes=t_points, spatial_ranges=actual_subset)
+            val_dataset = extract_TensorDataset(val_dataset, time_indexes=t_points, spatial_ranges=actual_subset)
+        else:
+            train_dataset = extract_TensorDataset(train_dataset, time_indexes=t_points[1:], spatial_ranges=actual_subset)
+            val_dataset = extract_TensorDataset(val_dataset, time_indexes=t_points[1:], spatial_ranges=actual_subset)
+
+    #if nl_dataset is not None:
+    #    nl_dataset = extract_TensorDataset(nl_dataset, spatial_ranges=nl_subset)
+    if boundary_mode is None and space_in_input:
+        raise ValueError("Missing boundary mode.")
+        #if "PINN" not in actual_mode:
+        #    boundary_mode = "Local+Joined"
+        #else:
+        #    boundary_mode = "LocalFull+Separated"
+    #if boundary_mode == "Joined":
+    #    train_dataset = extract_TensorDataset(train_dataset, spatial_ranges=actual_subset)
+    #    val_dataset = extract_TensorDataset(val_dataset, spatial_ranges=actual_subset)
+    #    
+    #    train_boundary = None
+    #    val_boundary = None
+    if boundary_mode is not None:
+        if boundary_mode == "Global":
+            train_boundary = extract_boundary(
+                dataset=train_dataset,
+                shape=actual_shape["shape"],
+                cell_size=actual_shape["cell_size"],
+                center=actual_shape["center"],
+                radius=actual_shape["radius"]
+            )
+            val_boundary = extract_boundary(
+                dataset=val_dataset,
+                shape=actual_shape["shape"],
+                cell_size=actual_shape["cell_size"],
+                center=actual_shape["center"],
+                radius=actual_shape["radius"]
+            )
+            if not pde_at_bd:
+                train_interior = extract_interior(
+                    dataset=train_dataset,
+                    shape=actual_shape["shape"],
+                    cell_size=actual_shape["cell_size"],
+                    center=actual_shape["center"],
+                    radius=actual_shape["radius"]
+                )
+                val_interior = extract_interior(
+                    dataset=val_dataset,
+                    shape=actual_shape["shape"],
+                    cell_size=actual_shape["cell_size"],
+                    center=actual_shape["center"],
+                    radius=actual_shape["radius"]
+                )
+
+                train_dataset = extract_TensorDataset(train_interior, spatial_ranges=actual_subset)
+                val_dataset = extract_TensorDataset(val_interior, spatial_ranges=actual_subset)
+            else:
+                train_dataset = extract_TensorDataset(train_dataset, spatial_ranges=actual_subset)
+                val_dataset = extract_TensorDataset(val_dataset, spatial_ranges=actual_subset)
+            #train_dataset = merge_datasets(train_interior, train_boundary)
+            #if val_dataset is not None:
+            #    val_dataset = merge_datasets(val_interior, val_boundary)
+
+        elif "Local" in boundary_mode:
+            train_dataset = extract_TensorDataset(train_dataset, spatial_ranges=actual_subset)
+            val_dataset = extract_TensorDataset(val_dataset, spatial_ranges=actual_subset)
+
+            train_boundary = extract_boundary(
+                dataset=train_dataset,
+                shape=actual_shape["shape"],
+                cell_size=actual_shape["cell_size"],
+                center=actual_shape["center"],
+                radius=actual_shape["radius"]
+            )
+            val_boundary = extract_boundary(
+                dataset=val_dataset,
+                shape=actual_shape["shape"],
+                cell_size=actual_shape["cell_size"],
+                center=actual_shape["center"],
+                radius=actual_shape["radius"]
+            )
+
+            if not pde_at_bd:
+                train_interior = extract_interior(
+                    dataset=train_dataset,
+                    shape=actual_shape["shape"],
+                    cell_size=actual_shape["cell_size"],
+                    center=actual_shape["center"],
+                    radius=actual_shape["radius"]
+                )
+                val_interior = extract_interior(
+                    dataset=val_dataset,
+                    shape=actual_shape["shape"],
+                    cell_size=actual_shape["cell_size"],
+                    center=actual_shape["center"],
+                    radius=actual_shape["radius"]
+                )
+                train_dataset = extract_TensorDataset(train_interior, spatial_ranges=actual_subset)
+                val_dataset = extract_TensorDataset(val_interior, spatial_ranges=actual_subset)
+
+            #if "Full" not in boundary_mode:
+            train_boundary = extract_TensorDataset(train_boundary, spatial_ranges=actual_subset)
+            val_boundary = extract_TensorDataset(val_boundary, spatial_ranges=actual_subset)
+    else:
+        train_dataset = extract_TensorDataset(train_interior, spatial_ranges=actual_subset)
+        val_dataset = extract_TensorDataset(val_interior, spatial_ranges=actual_subset)
+        train_boundary = None
+        val_boundary = None
+
+    if type(nl_dataset) is str:
+        if nl_dataset == "":
+            nl_dataset = None
+        elif not os.path.exists(nl_dataset):
+            raise ValueError(f"Dataset file '{nl_dataset}' not found.")
+        else:
+            nl_dataset = torch.load(nl_dataset, weights_only=False)
+
+    if nl_dataset is not None:
+        t = nl_subset[0].get("t")
+        t_points = nl_subset[0].get("t_points")
+        if t is None:
+            t = [0, len(nl_dataset.datasets)-1]
+        if t_points is None:
+            t_points = np.arange(start=t[0], stop=t[1]+1, step=1)
+        else:
+            t_points = [i for i in t_points if i >= t[0] and i <= t[1]]
+
+        if initial_time_mode_nl is None and len(nl_dataset.datasets) == 1:
+            initial_time_mode_nl = "Joined"
+        elif initial_time_mode_nl is None:
+            raise ValueError("Missing nl initial mode.")
+
+        if initial_time_mode_nl == "Excluded":
+            t_points = t_points[1:]
+            nl_initial = None
+            nl_dataset = extract_TensorDataset(nl_dataset, time_indexes=t_points[1:], spatial_ranges=nl_subset)
+        elif initial_time_mode_nl == "Joined":
+            nl_initial = None
+            nl_dataset = extract_TensorDataset(nl_dataset, time_indexes=t_points, spatial_ranges=nl_subset)
+        else: # initial_time_mode_nl == "Separated"
+            nl_initial = extract_TensorDataset(nl_dataset, time_indexes=[t_points[0]], spatial_ranges=nl_subset)
+            if pde_at_t0:
+                nl_dataset = extract_TensorDataset(nl_dataset, time_indexes=t_points, spatial_ranges=nl_subset)
+            else:
+                nl_dataset = extract_TensorDataset(nl_dataset, time_indexes=t_points[1:], spatial_ranges=nl_subset)
+
+        #if boundary_mode_nl is None and space_in_input:
+        #    raise ValueError("Missing nl boundary mode.")
+        if boundary_mode_nl is not None:
+            if boundary_mode_nl == "Global":
+                nl_boundary = extract_boundary(
+                    dataset=nl_dataset,
+                    shape=nl_shape["shape"],
+                    cell_size=nl_shape["cell_size"],
+                    center=nl_shape["center"],
+                    radius=nl_shape["radius"]
+                )
+                if not pde_at_bd:
+                    nl_interior = extract_interior(
+                        dataset=nl_dataset,
+                        shape=nl_shape["shape"],
+                        cell_size=nl_shape["cell_size"],
+                        center=nl_shape["center"],
+                        radius=nl_shape["radius"]
+                    )
+                    nl_dataset = extract_TensorDataset(nl_interior, spatial_ranges=nl_subset)
+                else:
+                    nl_dataset = extract_TensorDataset(nl_dataset, spatial_ranges=nl_subset)
+            elif "Local" in boundary_mode_nl:
+                nl_dataset = extract_TensorDataset(nl_dataset, spatial_ranges=nl_subset)
+                nl_boundary = extract_boundary(
+                    dataset=nl_dataset,
+                    shape=nl_shape["shape"],
+                    cell_size=nl_shape["cell_size"],
+                    center=nl_shape["center"],
+                    radius=nl_shape["radius"]
+                )
+                if not pde_at_bd:
+                    nl_interior = extract_interior(
+                        dataset=nl_dataset,
+                        shape=nl_shape["shape"],
+                        cell_size=nl_shape["cell_size"],
+                        center=nl_shape["center"],
+                        radius=nl_shape["radius"]
+                    )
+                    nl_dataset = extract_TensorDataset(nl_interior, spatial_ranges=nl_subset)
+                nl_boundary = extract_TensorDataset(nl_boundary, spatial_ranges=nl_subset)
+        else:
+            nl_dataset = extract_TensorDataset(nl_dataset, spatial_ranges=nl_subset)
+            nl_boundary = None
+    else:
+        nl_boundary = None
+        nl_initial = None
+        
+    if nl_dataset is not None and memory_buffer_size_nl is not None and len(nl_dataset) > memory_buffer_size_nl:
+        nl_dataset = subsample(
+            dataset=nl_dataset,
+            n_samples=memory_buffer_size_nl,
+            seed=seed
+        )
+    if nl_boundary is not None and memory_buffer_size_nl_bc is not None and len(nl_boundary) > memory_buffer_size_nl_bc:
+        nl_boundary = subsample(
+            dataset=nl_boundary,
+            n_samples=memory_buffer_size_nl_bc,
+            seed=seed
+        )
+    if nl_initial is not None and memory_buffer_size_nl_ic is not None and len(nl_initial) > memory_buffer_size_nl_ic:
+        nl_initial = subsample(
+            dataset=nl_initial,
+            n_samples=memory_buffer_size_nl_ic,
+            seed=seed
+        )
+    if nl_dataset is not None:
+        print(f"Unlabeled subsample size: {len(nl_dataset)}")
+    if nl_boundary is not None:
+        print(f"Unlabeled subsample bd size: {len(nl_boundary)}")
+    if nl_initial is not None:
+        print(f"Unlabeled subsample ic size: {len(nl_initial)}")
+
+    t = distill_subset[0].get("t")
+    t_points = distill_subset[0].get("t_points")
+    if t is not None:
+        if t_points is None:
+            t_points = np.arange(start=t[0], stop=t[1]+1, step=1)
+        else:
+            t_points = [i for i in t_points if i >= t[0] and i <= t[1]]
+
+    if type(distill_dataset) is str:
+        if distill_dataset == "":
+            distill_dataset = None
+        elif not os.path.exists(distill_dataset):
+            raise ValueError(f"Dataset file '{distill_dataset}' not found.")
+        else:
+            distill_dataset = torch.load(distill_dataset, weights_only=False)
+            distill_dataset = extract_TensorDataset(distill_dataset, time_indexes=t_points, spatial_ranges=distill_subset)
+    else:
+        distill_dataset = extract_TensorDataset(distill_dataset, time_indexes=t_points, spatial_ranges=distill_subset)
+    
+    if distill_dataset is not None and memory_buffer_size_distill is not None and len(distill_dataset) > memory_buffer_size_distill:
+        distill_dataset = subsample(
+            dataset=distill_dataset,
+            n_samples=memory_buffer_size_distill,
+            seed=seed
+        )
+    if distill_dataset is not None:
+        print(f"Distillation subsample size: {len(distill_dataset)}")
+
+
+    if distill_model == "" or distill_dataset is None:
+        distill_model = None
+    elif not os.path.exists(distill_model):
+        raise ValueError(f"Model file '{distill_model}' not found.")
+    if distill_model is not None:
+        distill_model = resume_model(
+            model_path=distill_model,
+            device=device
+            )
+        temp_distill_dataset = distill_dataset
+        if distill_model.time_in_input:
+            temp_distill_dataset = include_time_in_input(distill_dataset)
+        if not distill_model.space_in_input:
+            temp_distill_dataset = exclude_space_in_input(temp_distill_dataset)
+        temp_distill_dataset = distill_model.label(temp_distill_dataset)
+        distill_dataset = replace_labels(distill_dataset, temp_distill_dataset.tensors[U])
+
+    t = ewc_subset[0].get("t")
+    t_points = ewc_subset[0].get("t_points")
+    if t is not None:
+        if t_points is None:
+            t_points = np.arange(start=t[0], stop=t[1]+1, step=1)
+        else:
+            t_points = [i for i in t_points if i >= t[0] and i <= t[1]]
+
+    if type(ewc_dataset) is str:
+        if ewc_dataset == "":
+            ewc_dataset = None
+        elif not os.path.exists(ewc_dataset):
+            raise ValueError(f"Dataset file '{ewc_dataset}' not found.")
+        else:
+            ewc_dataset = torch.load(ewc_dataset, weights_only=False)
+            ewc_dataset = extract_TensorDataset(ewc_dataset, time_indexes=t_points, spatial_ranges=ewc_subset)
+    else:
+        ewc_dataset = extract_TensorDataset(ewc_dataset, time_indexes=t_points, spatial_ranges=ewc_subset)
+
+    if ewc_dataset is not None and memory_buffer_size_ewc is not None and len(ewc_dataset) > memory_buffer_size_ewc:
+        ewc_dataset = subsample(
+            dataset=ewc_dataset,
+            n_samples=memory_buffer_size_ewc,
+            seed=seed
+        )
+    if ewc_dataset is not None:
+        print(f"EWC subsample size: {len(ewc_dataset)}")
+
+
+     # EWC
+    if ewc_model == "" or ewc_dataset is None:
+        ewc_model = None
+        if ewc_mode == "On":
+            raise ValueError(f"EWC on but missing information: ewc_model = {ewc_model}, ewc_dataset = {ewc_dataset}.")
+    elif not os.path.exists(ewc_model):
+        raise ValueError(f"Model file '{ewc_model}' not found.")
+    elif ewc_dataset is not None:
+        ewc_model = resume_model(model_path=ewc_model, device=device, dwa_mode="Off", distill_mode="Forgetting", ewc_mode="Off")
+        if ewc_model.time_in_input:
+            ewc_dataset = include_time_in_input(ewc_dataset)
+        if not ewc_model.space_in_input:
+            ewc_dataset = exclude_space_in_input(ewc_dataset)
+        temp_ewc_dataset = ewc_model.label(ewc_dataset)
+        ewc_dataset = replace_labels(ewc_dataset, temp_ewc_dataset.tensors[U])
+
+    if actual_model != "":
+        if not os.path.exists(actual_model):
+            raise ValueError(f"Model file '{actual_model}' not found.") 
+        actual_model = resume_model(
+            model_path=actual_model,
+            device=device,
+            sys_mode=actual_mode,
+            distill_mode=distill_mode,
+            ewc_mode=ewc_mode,
+            dwa_mode=dwa_mode,
+            bc_mode=bc_mode,
+            monitor_conflicts=monitor_conflicts,
+            alpha=dwa_moving_avg_factor,
+            weighted_avg_frequency=dwa_moving_avg_frequency,
+            dwa_warm_up=dwa_warm_up,
+            bc_weight=actual_bc_weight,
+            ic_weight=actual_ic_weight,
+            out_weight=actual_out_weight,
+            der_weight=actual_der_weight,
+            derx_weight=actual_derx_weight,
+            dert_weight=actual_dert_weight,
+            hes_weight=actual_hes_weight,
+            hesx_weight=actual_hesx_weight,
+            hest_weight=actual_hest_weight,
+            res_weight=actual_res_weight,
+            nl_bc_weight=nl_bc_weight,
+            nl_ic_weight=nl_ic_weight,
+            nl_weight=nl_weight,
+            distill_out_weight=distill_out_weight,
+            distill_der_weight=distill_der_weight,
+            distill_derx_weight=distill_derx_weight,
+            distill_dert_weight=distill_dert_weight,
+            distill_hes_weight=distill_hes_weight,
+            distill_hesx_weight=distill_hesx_weight,
+            distill_hest_weight=distill_hest_weight,
+            ewc_weight=ewc_weight,
+            ewc_auto_weighting=ewc_auto_weighting,
+            ewc_warm_up=ewc_warm_up,
+            ewc_decay=ewc_decay_factor
+            ).to(device)
+    else:
+        actual_model = PdeNet(
+            pde=pde_name,
+            time_in_input=time_in_input,
+            space_in_input=space_in_input,
+            #fourier_features=fourier_features,
+            pde_params_in_input=pde_params_to_take_keys,
+            ic_params_in_input=ic_params_to_take_keys,
+            sys_mode=actual_mode,
+            bc_weight=actual_bc_weight,
+            ic_weight=actual_ic_weight,
+            out_weight=actual_out_weight,
+            der_weight=actual_der_weight,
+            derx_weight=actual_derx_weight,
+            dert_weight=actual_dert_weight,
+            hes_weight=actual_hes_weight,
+            hesx_weight=actual_hesx_weight,
+            hest_weight=actual_hest_weight,
+            res_weight=actual_res_weight,
+            nl_bc_weight=nl_bc_weight,
+            nl_ic_weight=nl_ic_weight,
+            nl_weight=nl_weight,
+            distill_mode=distill_mode,
+            distill_out_weight=distill_out_weight,
+            distill_der_weight=distill_der_weight,
+            distill_derx_weight=distill_derx_weight,
+            distill_dert_weight=distill_dert_weight,
+            distill_hes_weight=distill_hes_weight,
+            distill_hesx_weight=distill_hesx_weight,
+            distill_hest_weight=distill_hest_weight,
+            ewc_mode=ewc_mode,
+            ewc_weight=ewc_weight,
+            ewc_auto_weighting=ewc_auto_weighting,
+            ewc_warm_up=ewc_warm_up,
+            ewc_decay=ewc_decay_factor,
+            dwa_mode=dwa_mode,
+            bc_mode=bc_mode,
+            monitor_conflicts=monitor_conflicts,
+            alpha=dwa_moving_avg_factor,
+            moving_avg_frequency=dwa_moving_avg_frequency,
+            dwa_warm_up=dwa_warm_up,
+            input_units=input_units,
+            hidden_units=layers,
+            device=device,
+            activation=torch.nn.Tanh(),    
+            last_activation=False
+            ).to(device)
+        
+    if actual_model.time_in_input:
+        train_dataset = include_time_in_input(train_dataset)
+        if nl_dataset is not None:
+            nl_dataset = include_time_in_input(nl_dataset)
+        if val_dataset is not None:
+            val_dataset = include_time_in_input(val_dataset)
+        if distill_dataset is not None:
+            distill_dataset = include_time_in_input(distill_dataset)
+
+        if train_boundary is not None:
+            train_boundary = include_time_in_input(train_boundary)
+        if val_boundary is not None:
+            val_boundary = include_time_in_input(val_boundary)
+        if nl_boundary is not None:
+            nl_boundary = include_time_in_input(nl_boundary)
+        if train_initial is not None:
+            train_initial = include_time_in_input(train_initial)
+        if val_initial is not None:
+            val_initial = include_time_in_input(val_initial)
+        if nl_initial is not None:
+            nl_initial = include_time_in_input(nl_initial)
+
+    if not actual_model.space_in_input:
+        train_dataset = exclude_space_in_input(train_dataset)
+        if nl_dataset is not None:
+            nl_dataset = exclude_space_in_input(nl_dataset)
+        if val_dataset is not None:
+            val_dataset = exclude_space_in_input(val_dataset)
+        if distill_dataset is not None:
+            distill_dataset = exclude_space_in_input(distill_dataset)
+
+        if train_boundary is not None:
+            train_boundary = exclude_space_in_input(train_boundary)
+        if val_boundary is not None:
+            val_boundary = exclude_space_in_input(val_boundary)
+        if nl_boundary is not None:
+            nl_boundary = exclude_space_in_input(nl_boundary)
+        if train_initial is not None:
+            train_initial = exclude_space_in_input(train_initial)
+        if val_initial is not None:
+            val_initial = exclude_space_in_input(val_initial)
+        if nl_initial is not None:
+            nl_initial = exclude_space_in_input(nl_initial)
+
+
+    if ewc_model is not None:
+        if ewc_model.hidden_units != actual_model.hidden_units or ewc_model.input_units != actual_model.input_units:
+            raise ValueError(f"EWC requires that the models have the same architecture: EWC model has hidden units {ewc_model.hidden_units} and {input_units} input units, while the actual model has {actual_model.hidden_units} hidden units and {actual_model.input_units} input units.")
+        if ewc_src_fisher_file != "":
+            prev_fisher_diag = torch.load(ewc_src_fisher_file).to(device)
+        else:
+            prev_fisher_diag = None
+        with torch.no_grad():
+            actual_model.ewc_model_weights = ewc_model.get_weights()
+        actual_model.ewc_fisher_diag = ewc_model.get_fisher_diag(dataset=ewc_dataset)
+        if prev_fisher_diag is not None:
+            actual_model.ewc_fisher_diag = ewc_moving_avg_factor * actual_model.ewc_fisher_diag + (1 - ewc_moving_avg_factor) * prev_fisher_diag
+        if ewc_dst_fisher_file != "":
+            torch.save(actual_model.ewc_fisher_diag, ewc_dst_fisher_file)
+        else:
+            print("Warning: Fisher diagonal not stored (missing dst filepath 'dst_fisher_file' in the EWC dictionary).")
+    else:
+        actual_model.ewc_mode = "Off"
+        actual_model.ewc_model_weights = None
+        actual_model.ewc_fisher_diag = None
 
     # Models directory
-    models_dir = get_param(paths_config, 'models_dir', default_val='./models')
     os.makedirs(models_dir, exist_ok=True) # Ensure models directory exists
 
-    # Copy the config file in the model directory
-    shutil.copy(cli_args.config, models_dir)
+    if type(lr_init) is float:
+        lr_init = [lr_init]
+    if type(batch_size) is int:
+        batch_size = [batch_size]
 
-    # Datasets directory
-    datasets_dir = get_param(paths_config, 'datasets_dir', default_val='.')
+    config_dict = copy.deepcopy(config_dict)
+    config_dict["Actual"]["train_dataset"] = "TensorDataset object" if "<" in str(train_dataset) else train_dataset
+    config_dict["Actual"]["nl_dataset"] = "TensorDataset object" if "<" in str(nl_dataset) else nl_dataset
+    config_dict["Actual"]["val_dataset"] = "TensorDataset object" if "<" in str(val_dataset) else val_dataset
+    config_dict["Actual"]["model"] = (None if actual_model == None else "PdeNet object")
+    config_dict["Actual"]["res_weight"] = actual_res_weight
+    config_dict["Actual"]["out_weight"] = actual_out_weight
+    config_dict["Actual"]["der_weight"] = actual_der_weight
+    config_dict["Actual"]["derx_weight"] = actual_derx_weight
+    config_dict["Actual"]["dert_weight"] = actual_dert_weight
+    config_dict["Actual"]["hes_weight"] = actual_hes_weight
+    config_dict["Actual"]["hesx_weight"] = actual_hesx_weight
+    config_dict["Actual"]["hest_weight"] = actual_hest_weight
+    config_dict["Actual"]["bc_weight"] = actual_bc_weight
+    config_dict["Actual"]["ic_weight"] = actual_ic_weight
+    config_dict["Actual"]["monitor_conflicts"] = monitor_conflicts
+    config_dict["Actual"]["importance"] = actual_importance
+    config_dict["Actual"]["bc_importance"] = actual_bc_importance
+    config_dict["Actual"]["ic_importance"] = actual_ic_importance
+    config_dict["Actual"]["mode"] = actual_mode
+    config_dict["Actual"]["layers"] = layers
+    config_dict["Actual"]["fourier_features"] = actual_model.fourier_features
+    config_dict["Actual"]["frequency_variance"] = actual_model.frequency_variance
+    config_dict["Actual"]["pde_params_in_input"] = actual_model.pde_params_in_input
+    config_dict["Actual"]["ic_params_in_input"] = actual_model.ic_params_in_input
+    config_dict["Actual"]["boundary"] = boundary_mode
+    config_dict["Actual"]["pde_at_bd"] = pde_at_bd
+    config_dict["Actual"]["pde_at_t0"] = pde_at_t0
+    config_dict["Actual"]["initial_time"] = initial_time_mode
 
-    # Training dataset
-    train_dataset_file = get_param(paths_config, 'train_dataset', default_val='')
-    if train_dataset_file == '':
-        print('ERROR: Required train_dataset arg not specified. Exiting.', file=sys.stderr)
-        sys.exit(1)
-    train_dataset = torch.load(os.path.join(datasets_dir, train_dataset_file), weights_only=False)
+    if config_dict.get("Unlabeled") is None:
+        config_dict["Unlabeled"] = {}
+    config_dict["Unlabeled"]["dataset"] = "TensorDataset object" if "<" in str(nl_dataset) else nl_dataset
+    config_dict["Unlabeled"]["buffer_size"] = memory_buffer_size_nl
+    config_dict["Unlabeled"]["buffer_size_bc"] = memory_buffer_size_nl_bc
+    config_dict["Unlabeled"]["buffer_size_ic"] = memory_buffer_size_nl_ic
+    config_dict["Unlabeled"]["weight"] = nl_weight
+    config_dict["Unlabeled"]["importance"] = nl_importance
+    config_dict["Unlabeled"]["bc_weight"] = nl_bc_weight
+    config_dict["Unlabeled"]["bc_importance"] = nl_bc_importance
+    config_dict["Unlabeled"]["ic_weight"] = nl_ic_weight
+    config_dict["Unlabeled"]["ic_importance"] = nl_ic_importance
+    config_dict["Unlabeled"]["boundary"] = boundary_mode_nl
+    config_dict["Unlabeled"]["initial_time"] = initial_time_mode_nl
 
-    # Evaluation dataset
-    eval_dataset_file = get_param(paths_config, 'eval_dataset', default_val='')
-    if eval_dataset_file == '':
-        print('ERROR: Required eval_dataset arg not specified. Exiting.', file=sys.stderr)
-        sys.exit(1)
-    eval_dataset = torch.load(os.path.join(datasets_dir, eval_dataset_file), weights_only=False)
+    if config_dict.get("Distillation") is None:
+        config_dict["Distillation"] = {}
+    config_dict["Distillation"]["dataset"] = "TensorDataset object" if "<" in str(distill_dataset) else distill_dataset
+    config_dict["Distillation"]["buffer_size"] = memory_buffer_size_distill
+    config_dict["Distillation"]["model"] = (None if distill_model == None else "PdeNet object")
+    config_dict["Distillation"]["mode"] = distill_mode
+    config_dict["Distillation"]["out_weight"] = distill_out_weight
+    config_dict["Distillation"]["der_weight"] = distill_der_weight
+    config_dict["Distillation"]["derx_weight"] = distill_derx_weight
+    config_dict["Distillation"]["dert_weight"] = distill_dert_weight
+    config_dict["Distillation"]["hes_weight"] = distill_hes_weight
+    config_dict["Distillation"]["hesx_weight"] = distill_hesx_weight
+    config_dict["Distillation"]["hest_weight"] = distill_hest_weight
+    config_dict["Distillation"]["importance"] = distill_importance
 
-    # Boundary conditions dataset
-    train_bc_dataset_file = get_param(paths_config, 'train_bc_dataset', default_val='')
-    if train_bc_dataset_file == '':
-        train_bc_dataset = None
-    else:
-        train_bc_dataset = torch.load(os.path.join(datasets_dir, train_bc_dataset_file), weights_only=False)
-
-    # Initial conditions dataset
-    train_ic_dataset_file = get_param(paths_config, 'train_ic_dataset', default_val='')
-    if train_ic_dataset_file == '':
-        train_ic_dataset = None
-    else:
-        train_ic_dataset = torch.load(os.path.join(datasets_dir, train_ic_dataset_file), weights_only=False)
-
-    # Boundary conditions dataset
-    eval_bc_dataset_file = get_param(paths_config, 'eval_bc_dataset', default_val='')
-    if eval_bc_dataset_file == '':
-        eval_bc_dataset = None
-    else:
-        eval_bc_dataset = torch.load(os.path.join(datasets_dir, eval_bc_dataset_file), weights_only=False)
-
-    # Initial conditions dataset
-    eval_ic_dataset_file = get_param(paths_config, 'eval_ic_dataset', default_val='')
-    if eval_ic_dataset_file == '':
-        eval_ic_dataset = None
-    else:
-        eval_ic_dataset = torch.load(os.path.join(datasets_dir, eval_ic_dataset_file), weights_only=False)
+    if config_dict.get("EWC") is None:
+        config_dict["EWC"] = {}
+    config_dict["EWC"]["dataset"] = "TensorDataset object" if "<" in str(ewc_dataset) else ewc_dataset
+    config_dict["EWC"]["buffer_size"] = memory_buffer_size_ewc
+    config_dict["EWC"]["model"] = (None if ewc_model == None else "PdeNet object")
+    config_dict["EWC"]["mode"] = ewc_mode
+    config_dict["EWC"]["weight"] = ewc_weight
+    config_dict["EWC"]["auto_weighting"] = ewc_auto_weighting
+    config_dict["EWC"]["warm_up"] = ewc_warm_up
+    config_dict["EWC"]["decay"] = ewc_decay_factor
+    config_dict["EWC"]["importance"] = ewc_importance
+    config_dict["EWC"]["src_fisher_diag_file"] = ewc_src_fisher_file
+    config_dict["EWC"]["dst_fisher_diag_file"] = ewc_dst_fisher_file
+    config_dict["EWC"]["moving_avg_factor"] = ewc_moving_avg_factor
     
-    # Starting model (optional)
-    model_file = get_param(paths_config, 'starting_model', default_val='')
-    if model_file == '':
-        starting_model = None
+
+    if config_dict.get("DWA") is None:
+        config_dict["DWA"] = {}
+    config_dict["DWA"]["mode"] = dwa_mode
+    config_dict["DWA"]["moving_avg_factor"] = dwa_moving_avg_factor
+    config_dict["DWA"]["moving_avg_frequency"] = dwa_moving_avg_frequency
+    config_dict["DWA"]["dwa_warm_up"] = dwa_warm_up
+    config_dict["DWA"]["delayed_weights"] = delayed_weights
+
+    config_dict["learning_rate"] = lr_init
+    config_dict["batch_size"] = batch_size
+    config_dict["clip_grad"] = clip_grad
+    config_dict["epochs"] = epochs
+    config_dict["early_stop_value"] = early_stop_value
+
+    config_dict["pruner"] = pruner
+    config_dict["threshold"] = threshold
+    config_dict["n_warmup_steps"] = n_warmup_steps
+    config_dict["n_trials"] = n_trials
+    config_dict["train_steps"] = train_steps
+    config_dict["eval_every"] = eval_every
+    config_dict["seed"] = seed
+    config_dict["device"] = device
+    config_dict["scheduler"] = scheduler
+    config_dict["models_dir"] = models_dir
+
+    if type(config) is str:
+        # Copy the config file in the model directory
+        shutil.copy(config, models_dir)
     else:
-        starting_model = model_file
+        config = "config.yaml"
 
-    # Distillation dataset and distillation model
-    distill_dataset_file = get_param(paths_config, 'distill_dataset', default_val='')
-    distill_on_actual_data = False
-    if distill_dataset_file == '':
-        distill_dataset = None
-        distill_model = None
-        distill_with_pde_params = False
-        distill_mode = 'Forgetting'
-    else:
-        if distill_dataset_file == train_dataset_file:
-            distill_on_actual_data = True
-        distill_dataset = torch.load(os.path.join(datasets_dir, distill_dataset_file), weights_only=False)
-        distill_model_file = get_param(paths_config, 'distill_model', default_val='')
-        distill_with_pde_params = get_param(training_config, 'distill_with_pde_params', default_val=False, type_func=bool)
-        # if the distill_dataset_file is passed and the distill_model is not passed,
-        # assume that the distill_dataset_file is already labeled by distill_model
-        if distill_model_file == '':
-            distill_model = None
-        # if both are passed, label the distillation dataset whith distill_model and work with it
-        else:
-            distill_model = resume_model(model_path=distill_model_file, device=device)
-            distill_dataset = distill_model.label(dataset=distill_dataset, save=False, with_pde_in_params=distill_with_pde_params)
-
-    # EWC
-    if ewc_mode == 'On' and distill_model is not None:
-        with torch.no_grad():
-            ewc_params = distill_model.get_weights()
-        ewc_fisher_diag = distill_model.get_fisher_diag(dataset=distill_dataset, sys_mode=sys_mode, with_pde_params=distill_with_pde_params)
-    else:
-        ewc_mode = 'Off'
-        ewc_params = None
-        ewc_fisher_diag = None
-
-    # Check if optimize hyperparameters or fix them
-    hyp_mode = get_param(hyperparams_config, 'mode', default_val='Fix')
-
-    if hyp_mode == 'Fix':
-        bc_weight_fixed = get_param(hyperparams_config, 'bc_weight', default_val=1.0, type_func=float)
-        bc_weight = [bc_weight_fixed, bc_weight_fixed]
-        ic_weight_fixed = get_param(hyperparams_config, 'ic_weight', default_val=1.0, type_func=float)
-        ic_weight = [ic_weight_fixed, ic_weight_fixed]
-        phy_weight_fixed = get_param(hyperparams_config, 'phy_weight', default_val=1.0, type_func=float)
-        phy_weight = [phy_weight_fixed, phy_weight_fixed]
-        distill_weight_fixed = get_param(hyperparams_config, 'distill_weight', default_val=1.0, type_func=float)
-        distill_weight = [distill_weight_fixed, distill_weight_fixed]
-        ewc_weight_fixed = get_param(hyperparams_config, 'ewc_weight', default_val=1.0, type_func=float)
-        ewc_weight = [ewc_weight_fixed, ewc_weight_fixed]
-        lr_init_fixed = get_param(hyperparams_config, 'lr_init', default_val=1e-5, type_func=float)
-        lr_init = [lr_init_fixed]
-        batch_size = [get_param(hyperparams_config, 'batch_size', default_val=1024, type_func=int)]
-    else: # hyp_mode == 'Optimize'
-        bc_weight_str = get_param(hyperparams_config, 'bc_weight', default_val=[1.0, 1.0], type_func=list)
-        bc_weight = [float(x) for x in bc_weight_str]
-        ic_weight_str = get_param(hyperparams_config, 'ic_weight', default_val=[1.0, 1.0], type_func=list)
-        ic_weight = [float(x) for x in ic_weight_str]
-        phy_weight_str = get_param(hyperparams_config, 'phy_weight', default_val=[1.0, 1.0], type_func=list)
-        phy_weight = [float(x) for x in phy_weight_str]
-        distill_weight_str = get_param(hyperparams_config, 'distill_weight', default_val=[1.0, 1.0], type_func=list)
-        distill_weight = [float(x) for x in distill_weight_str]
-        ewc_weight_str = get_param(hyperparams_config, 'ewc_weight', default_val=[1.0, 1.0], type_func=list)
-        ewc_weight = [float(x) for x in ewc_weight_str]
-        lr_init_str = get_param(hyperparams_config, 'lr_init', default_val=[1e-5], type_func=list)
-        lr_init = [float(x) for x in lr_init_str]
-        batch_size_str = get_param(hyperparams_config, 'batch_size', default_val=[1024], type_func=list)
-        batch_size = [int(x) for x in batch_size_str]
+    with open(f"{models_dir}/{os.path.basename(config)}", "w") as file:
+        yaml.dump(config_dict, file, sort_keys=False)
+    os.rename(f"{models_dir}/{os.path.basename(config)}", f"{models_dir}/config.yaml")
 
     objective = Objective(
         seed = seed,
-        starting_model = starting_model,
-        pde_name = pde_name,
-        pde_params = pde_params,
-        with_pde_params = with_pde_params,
-        sys_mode = sys_mode,
-        distill_mode = distill_mode,
-        ewc_mode = ewc_mode,
-        ewc_params = ewc_params,
-        ewc_fisher_diag = ewc_fisher_diag,
-        input_units=input_units,
-        layers = layers,
+        model = actual_model,
+        importances = importances,
         train_steps = train_steps,
         epochs = epochs,
-        optim = optim,
+        early_stop_value = early_stop_value,
         eval_every = eval_every,
         train_dataset = train_dataset,
-        eval_dataset = eval_dataset,
-        train_bc_dataset = train_bc_dataset,
-        train_ic_dataset = train_ic_dataset,
-        eval_bc_dataset = eval_bc_dataset,
-        eval_ic_dataset = eval_ic_dataset,
+        nl_dataset = nl_dataset,
+        val_dataset = val_dataset,
+        train_bc_dataset = train_boundary,
+        train_ic_dataset = train_initial,
+        nl_bc_dataset = nl_boundary,
+        nl_ic_dataset = nl_initial,
+        val_bc_dataset = val_boundary,
+        val_ic_dataset = val_initial,
         distill_dataset = distill_dataset,
-        distill_on_actual_data = distill_on_actual_data,
-        distill_with_pde_params = distill_with_pde_params,
-        batch_size_list = batch_size,
-        lr_init_list = lr_init,
-        phy_weight_interval = phy_weight,
-        bc_weight_interval = bc_weight,
-        ic_weight_interval = ic_weight,
-        distill_weight_interval = distill_weight,
-        ewc_weight_interval = ewc_weight,
+        batch_size = batch_size,
+        clip_grad = clip_grad,
+        lr_init = lr_init,
+        fourier_features=fourier_features,
+        frequency_variance=frequency_variance,
+        scheduler_mode=scheduler,
+        delayed_weights=delayed_weights,
         device = device,
-        models_dir = models_dir
+        models_dir = models_dir,
+        suggestions=suggestions
         )
 
     if pruner == "threshold":
@@ -871,17 +1040,48 @@ if __name__ == "__main__":
     else:
         opt_pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=n_warmup_steps, interval_steps=1)
     
-    study = optuna.create_study(direction = "minimize", pruner=opt_pruner)
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    study = optuna.create_study(direction = "minimize", pruner=opt_pruner, sampler=sampler)
     study.optimize(objective, n_trials = n_trials)
 
     print("Best trial params:", study.best_trial.params)
     print("Best trial value:", study.best_trial.value)
 
-    best_trial_filename = f"{models_dir}/trial{study.best_trial.number}"
-    best_trial_new_filename = f"{models_dir}/best_trial"
-    if os.path.exists(best_trial_new_filename):
-        if os.path.isfile(best_trial_new_filename):
-            os.remove(best_trial_new_filename)
-        elif os.path.isdir(best_trial_new_filename):
-            shutil.rmtree(best_trial_new_filename)
-    os.rename(best_trial_filename, best_trial_new_filename)
+    # Sort the trials by their objective value
+    all_trials = [t for t in study.trials if t.state != TrialState.PRUNED]
+    sorted_trials = sorted_trials = sorted(
+        all_trials,
+        key=lambda t: t.value
+        )
+
+    # Assign a new 'rank' attribute to each trial
+    for i, trial in enumerate(sorted_trials):
+        rank = i
+        old_name = trial.user_attrs.get("trial_name")
+        new_name = f"trial{rank}"
+        trial.set_user_attr("rank", rank)
+        trial.set_user_attr("old_trial_name", old_name)
+        trial.set_user_attr("trial_name", new_name)
+
+        new_filename = f"{models_dir}/{new_name}"
+        old_filename = f"{models_dir}/{old_name}"
+        if os.path.exists(new_filename):
+            if os.path.isfile(new_filename):
+                os.remove(new_filename)
+            elif os.path.isdir(new_filename):
+                shutil.rmtree(new_filename)
+        if os.path.exists(old_filename):
+            os.rename(old_filename, new_filename)
+            print(f"{old_name} --> {new_name}: Objective Value = {trial.value:.4f}")
+
+# ===================================================== Main =====================================================
+if __name__ == "__main__":
+    # Init parser for command-line arguments
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--config", default="config.yaml", type=str, help="Path to the configuration file (YAML)")
+
+    # Parse command-line arguments
+    cli_args = parser.parse_args()
+
+    start_train(cli_args.config)
