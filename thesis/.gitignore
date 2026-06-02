@@ -1,0 +1,7 @@
+data/
+models/
+myenv/
+__pycache__/
+AdvectionReactionDiffusion/
+AllenCahn/
+Pendulum/
