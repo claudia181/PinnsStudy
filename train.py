@@ -7,32 +7,25 @@ This module contains:
 - get_param (used by start_train)
 
 This module implements the interface to start a training process under given configurations.
-It is possible to pass the training configurations
-- through a dictionary argument to start_train,
-- directly as arguments to start_train,
-- through a YAML file (following to a given format).
-The 2nd option allows to pass directly datasets or models objects instead of paths to stored files.
+It is possible to pass the training configurations through a dictionary argument to start_train.
 """
 
-
 import torch
-from torch.utils.data import TensorDataset, ConcatDataset
 import argparse
 import numpy as np
 import random
 import os
 import yaml
-from load_store_utils import resume_model
 import optuna
 from optuna.trial import TrialState
 import shutil
+import copy
+
 from optuna_objective import Objective
 from model import PdeNet
-from data_utils import subsample, subset_to_tensordataset, replace_labels, extract_TensorDataset, extract_boundary, extract_interior, merge_datasets, include_time_in_input, exclude_space_in_input
-from load_store_utils import store_split
+from data_utils import subsample, replace_labels, extract_TensorDataset, extract_boundary, extract_interior, include_time_in_input, exclude_space_in_input
+from load_store_utils import resume_model
 from generate import X, U
-import sys
-import copy
 
 # ============================================ Function to get value ============================================
 def get_param(config_section_dict, config_key, default_val=None, type_func=None):
@@ -46,7 +39,7 @@ def get_param(config_section_dict, config_key, default_val=None, type_func=None)
         return default_val
 
 # =============================================== Run configuration ===============================================
-def start_train(config: dict|str, **kwargs):
+def start_train(config: dict|str):
     if type(config) is str:
         # Load configuration from YAML file
         config_dict = {}
@@ -80,8 +73,8 @@ def start_train(config: dict|str, **kwargs):
     frequency_variance          = get_param(actual_dict, "frequency_variance", default_val=1.0)
     pde_params_to_take_keys     = get_param(actual_dict, "pde_params_in_input", default_val=[], type_func=list)
     ic_params_to_take_keys      = get_param(actual_dict, "ic_params_in_input", default_val=[], type_func=list)
-    train_dataset_path          = get_param(actual_dict, "train_dataset", default_val="") # path
-    val_dataset_path            = get_param(actual_dict, "val_dataset", default_val="") # path
+    train_dataset               = get_param(actual_dict, "train_dataset", default_val="") # path
+    val_dataset                 = get_param(actual_dict, "val_dataset", default_val="") # path
     actual_subset               = get_param(actual_dict, "subset", default_val={})
     actual_shape                = get_param(actual_dict, "shape", default_val={"shape": "rectangle", "cell_size": None, "center": None, "radius": None})
     boundary_mode               = get_param(actual_dict, "boundary")
@@ -89,56 +82,48 @@ def start_train(config: dict|str, **kwargs):
     pde_at_bd                   = get_param(actual_dict, "pde_at_bd", type_func=bool, default_val=True)
     pde_at_t0                   = get_param(actual_dict, "pde_at_t0", type_func=bool, default_val=True)
     initial_time_mode           = get_param(actual_dict, "initial_time") # Excluded, Separated, Joined
-    actual_importance           = get_param(actual_dict, "importance", default_val=1.0)
-    actual_bc_importance        = get_param(actual_dict, "bc_importance", default_val=1.0)
-    actual_ic_importance        = get_param(actual_dict, "ic_importance", default_val=1.0)
     actual_bc_weight            = get_param(actual_dict, "bc_weight", default_val=1.0, type_func=float)
     actual_ic_weight            = get_param(actual_dict, "ic_weight", default_val=1.0, type_func=float)
     actual_out_weight           = get_param(actual_dict, "out_weight", default_val=1.0, type_func=float)
     actual_der_weight           = get_param(actual_dict, "der_weight", default_val=1.0, type_func=float)
-    actual_derx_weight           = get_param(actual_dict, "derx_weight", default_val=1.0, type_func=float)
-    actual_dert_weight           = get_param(actual_dict, "dert_weight", default_val=1.0, type_func=float)
+    actual_dert_weight          = get_param(actual_dict, "dert_weight", default_val=1.0, type_func=float)
+    actual_derx_weight          = get_param(actual_dict, "derx_weight", default_val=1.0, type_func=float)
     actual_hes_weight           = get_param(actual_dict, "hes_weight", default_val=1.0, type_func=float)
-    actual_hesx_weight           = get_param(actual_dict, "hesx_weight", default_val=1.0, type_func=float)
-    actual_hest_weight           = get_param(actual_dict, "hest_weight", default_val=1.0, type_func=float)
+    actual_hesx_weight          = get_param(actual_dict, "hesx_weight", default_val=1.0, type_func=float)
+    actual_hest_weight          = get_param(actual_dict, "hest_weight", default_val=1.0, type_func=float)
     actual_res_weight           = get_param(actual_dict, "res_weight", default_val=1.0, type_func=float)
     monitor_conflicts           = get_param(actual_dict, "monitor_conflicts", default_val=False, type_func=bool)
     
-    nl_dataset_path         = get_param(unlabeled_dict, "dataset", default_val="") # path
-    nl_subset               = get_param(unlabeled_dict, "subset", default_val={})
-    memory_buffer_size_nl   = get_param(unlabeled_dict, "buffer_size", default_val=None)
-    memory_buffer_size_nl_bc   = get_param(unlabeled_dict, "buffer_size_bc", default_val=None)
-    memory_buffer_size_nl_ic   = get_param(unlabeled_dict, "buffer_size_ic", default_val=None)
-    nl_importance           = get_param(unlabeled_dict, "importance", default_val=1.0)
-    nl_weight               = get_param(unlabeled_dict, "weight", default_val=1.0, type_func=float)
-    nl_bc_importance        = get_param(unlabeled_dict, "bc_importance", default_val=1.0)
-    nl_ic_importance        = get_param(unlabeled_dict, "ic_importance", default_val=1.0)
-    nl_bc_weight            = get_param(unlabeled_dict, "bc_weight", default_val=1.0, type_func=float)
-    nl_ic_weight            = get_param(unlabeled_dict, "ic_weight", default_val=1.0, type_func=float)
-    nl_shape                = get_param(unlabeled_dict, "shape", default_val={"shape": "rectangle", "cell_size": None, "center": None, "radius": None})
-    boundary_mode_nl        = get_param(unlabeled_dict, "boundary")
-    initial_time_mode_nl    = get_param(unlabeled_dict, "initial_time")
+    nl_dataset                  = get_param(unlabeled_dict, "dataset", default_val="") # path
+    nl_subset                   = get_param(unlabeled_dict, "subset", default_val={})
+    memory_buffer_size_nl       = get_param(unlabeled_dict, "buffer_size", default_val=None)
+    memory_buffer_size_nl_bc    = get_param(unlabeled_dict, "buffer_size_bc", default_val=None)
+    memory_buffer_size_nl_ic    = get_param(unlabeled_dict, "buffer_size_ic", default_val=None)
+    nl_weight                   = get_param(unlabeled_dict, "weight", default_val=1.0, type_func=float)
+    nl_bc_weight                = get_param(unlabeled_dict, "bc_weight", default_val=1.0, type_func=float)
+    nl_ic_weight                = get_param(unlabeled_dict, "ic_weight", default_val=1.0, type_func=float)
+    nl_shape                    = get_param(unlabeled_dict, "shape", default_val={"shape": "rectangle", "cell_size": None, "center": None, "radius": None})
+    boundary_mode_nl            = get_param(unlabeled_dict, "boundary")
+    initial_time_mode_nl        = get_param(unlabeled_dict, "initial_time")
 
     distill_mode                = get_param(distill_dict, "mode", default_val="Forgetting")
     distill_model               = get_param(distill_dict, "model", default_val="") # path
-    distill_dataset_path        = get_param(distill_dict, "dataset", default_val="") # path
+    distill_dataset             = get_param(distill_dict, "dataset", default_val="") # path
     distill_subset              = get_param(distill_dict, "subset", default_val={})
     memory_buffer_size_distill  = get_param(distill_dict, "buffer_size", default_val=None)
-    distill_importance          = get_param(distill_dict, "importance", default_val=1.0)
     distill_out_weight          = get_param(distill_dict, "out_weight", default_val=1.0, type_func=float)
     distill_der_weight          = get_param(distill_dict, "der_weight", default_val=1.0, type_func=float)
-    distill_derx_weight          = get_param(distill_dict, "derx_weight", default_val=1.0, type_func=float)
-    distill_dert_weight          = get_param(distill_dict, "dert_weight", default_val=1.0, type_func=float)
+    distill_derx_weight         = get_param(distill_dict, "derx_weight", default_val=1.0, type_func=float)
+    distill_dert_weight         = get_param(distill_dict, "dert_weight", default_val=1.0, type_func=float)
     distill_hes_weight          = get_param(distill_dict, "hes_weight", default_val=1.0, type_func=float)
-    distill_hesx_weight          = get_param(distill_dict, "hesx_weight", default_val=1.0, type_func=float)
-    distill_hest_weight          = get_param(distill_dict, "hest_weight", default_val=1.0, type_func=float)
+    distill_hesx_weight         = get_param(distill_dict, "hesx_weight", default_val=1.0, type_func=float)
+    distill_hest_weight         = get_param(distill_dict, "hest_weight", default_val=1.0, type_func=float)
 
     ewc_mode                = get_param(ewc_dict, "mode", default_val="Off")
     ewc_model               = get_param(ewc_dict, "model", default_val="") # path
-    ewc_dataset_path        = get_param(ewc_dict, "dataset", default_val="") # path
+    ewc_dataset             = get_param(ewc_dict, "dataset", default_val="") # path
     ewc_subset              = get_param(ewc_dict, "subset", default_val={})
     memory_buffer_size_ewc  = get_param(ewc_dict, "buffer_size", default_val=None)
-    ewc_importance          = get_param(ewc_dict, "importance", default_val=1.0)
     ewc_weight              = get_param(ewc_dict, "weight", default_val=1.0, type_func=float)
     ewc_auto_weighting      = get_param(ewc_dict, "auto_weighting", default_val=False, type_func=bool)
     ewc_warm_up             = get_param(ewc_dict, "warm_up", default_val=0, type_func=int)
@@ -169,106 +154,6 @@ def start_train(config: dict|str, **kwargs):
     clip_grad           = get_param(config_dict, "clip_grad", type_func=bool, default_val=True)
     models_dir          = get_param(config_dict, "models_dir", default_val=f"./{pde_name.replace('-', '')}/models")
     suggestions         = get_param(config_dict, "suggestions", default_val="On")
-
-    train_dataset   = kwargs.get("train_dataset")
-    val_dataset     = kwargs.get("val_dataset")
-    nl_dataset      = kwargs.get("nl_dataset")
-    distill_dataset = kwargs.get("distill_dataset")
-    ewc_dataset     = kwargs.get("ewc_dataset")
-
-    if train_dataset is None: train_dataset = train_dataset_path
-    if val_dataset is None: val_dataset = val_dataset_path
-    if nl_dataset is None: nl_dataset = nl_dataset_path
-    if distill_dataset is None: distill_dataset = distill_dataset_path
-    if ewc_dataset is None: ewc_dataset = ewc_dataset_path
-
-    layers                  = get_param(kwargs, "layers", default_val=layers, type_func=list)
-    time_in_input           = get_param(kwargs, "time_in_input", default_val=time_in_input, type_func=bool)
-    space_in_input          = get_param(kwargs, "space_in_input", default_val=space_in_input, type_func=bool)
-    fourier_features        = get_param(kwargs, "fourier_features", default_val=fourier_features, type_func=int)
-    frequency_variance      = get_param(kwargs, "frequency_variance", default_val=frequency_variance, type_func=float)
-    pde_params_to_take_keys = get_param(kwargs, "pde_params", default_val=pde_params_to_take_keys)
-    ic_params_to_take_keys  = get_param(kwargs, "ic_params", default_val=ic_params_to_take_keys)
-
-    actual_model            = get_param(kwargs, "actual_model", default_val=actual_model)
-    distill_model           = get_param(kwargs, "distill_model", default_val=distill_model)
-    ewc_model               = get_param(kwargs, "ewc_model", default_val=ewc_model)
-
-    pruner                  = get_param(kwargs, "pruner", default_val=pruner)
-    threshold               = get_param(kwargs, "threshold", default_val=threshold)
-    n_warmup_steps          = get_param(kwargs, "n_warmup_steps", n_warmup_steps)
-    n_trials                = get_param(kwargs, "n_trials", default_val=n_trials)
-    train_steps             = get_param(kwargs, "train_steps", default_val=train_steps)
-    epochs                  = get_param(kwargs, "epochs", default_val=epochs)
-    early_stop_value        = get_param(kwargs, "early_stop_value", default_val=early_stop_value)
-    ewc_decay_factor        = get_param(kwargs, "ewc_decay", default_val=ewc_decay_factor)
-    eval_every              = get_param(kwargs, "eval_every", default_val=eval_every)
-    seed                    = get_param(kwargs, "seed", default_val=seed)
-    device                  = get_param(kwargs, "device", default_val=device)
-    lr_init                 = get_param(kwargs, "lr_init", default_val=lr_init)
-    scheduler               = get_param(kwargs, "scheduler", default_val=scheduler)
-    batch_size              = get_param(kwargs, "batch_size", default_val=batch_size)
-    clip_grad               = get_param(kwargs, "clip_grad", default_val=clip_grad)
-    models_dir              = get_param(kwargs, "models_dir", default_val=models_dir)
-    suggestions             = get_param(kwargs, "suggestions", default_val=suggestions)
-
-    actual_subset           = get_param(kwargs, "actual_subset", default_val=actual_subset)
-    actual_shape            = get_param(kwargs, "actual_shape", default_val=actual_shape)
-
-    nl_subset               = get_param(kwargs, "nl_subset", default_val=nl_subset)
-    nl_shape                = get_param(kwargs, "nl_shape", default_val=nl_shape)
-
-    distill_subset          = get_param(kwargs, "distill_subset", default_val=distill_subset)
-    ewc_subset              = get_param(kwargs, "ewc_subset", default_val=ewc_subset)
-
-    memory_buffer_size_nl       = get_param(kwargs, "nl_buffer_size", default_val=memory_buffer_size_nl)
-    memory_buffer_size_nl_bc       = get_param(kwargs, "nl_buffer_size_bc", default_val=memory_buffer_size_nl_bc)
-    memory_buffer_size_nl_ic       = get_param(kwargs, "nl_buffer_size_ic", default_val=memory_buffer_size_nl_ic)
-    memory_buffer_size_distill  = get_param(kwargs, "distill_buffer_size", default_val=memory_buffer_size_distill)
-    memory_buffer_size_ewc      = get_param(kwargs, "ewc_buffer_size", default_val=memory_buffer_size_ewc)
-
-    actual_mode             = get_param(kwargs, "actual_mode", default_val=actual_mode)
-    distill_mode            = get_param(kwargs, "distill_mode", default_val=distill_mode)
-    ewc_mode                = get_param(kwargs, "ewc_mode", default_val=ewc_mode)
-    dwa_mode                = get_param(kwargs, "dwa_mode", default_val=dwa_mode)
-    boundary_mode           = get_param(kwargs, "boundary_mode", default_val=boundary_mode)
-    bc_mode                 = get_param(kwargs, "bc_mode", default_val=bc_mode)
-    initial_time_mode       = get_param(kwargs, "initial_time", default_val=initial_time_mode) # Excluded, Separated, Joined
-    boundary_mode_nl           = get_param(kwargs, "boundary_mode_nl", default_val=boundary_mode_nl)
-    initial_time_mode_nl       = get_param(kwargs, "initial_time_nl", default_val=initial_time_mode_nl)
-    pde_at_bd               = get_param(kwargs, "pde_at_bd", default_val=pde_at_bd)
-    pde_at_t0               = get_param(kwargs, "pde_at_t0", default_val=pde_at_t0)
-    
-
-    dwa_warm_up                 = get_param(kwargs, "dwa_warm_up", default_val=dwa_warm_up)
-    dwa_moving_avg_factor       = get_param(kwargs, "dwa_moving_avg_factor", default_val=dwa_moving_avg_factor)
-    dwa_moving_avg_frequency    = get_param(kwargs, "dwa_moving_avg_frequency", default_val=dwa_moving_avg_frequency)
-    delayed_weights             = get_param(kwargs, "delayed_weights", default_val=delayed_weights)
-    
-    ewc_src_fisher_file     = get_param(kwargs, "ewc_src_fisher_file", default_val=ewc_src_fisher_file)
-    ewc_dst_fisher_file     = get_param(kwargs, "ewc_dst_fisher_file", default_val=ewc_dst_fisher_file)
-    ewc_moving_avg_factor   = get_param(kwargs, "ewc_moving_avg_factor", default_val=ewc_moving_avg_factor)
-
-    actual_importance       = get_param(kwargs, "importance", default_val=actual_importance)
-    actual_bc_importance    = get_param(kwargs, "bc_importance", default_val=actual_bc_importance)
-    actual_ic_importance    = get_param(kwargs, "ic_importance", default_val=actual_ic_importance)
-    distill_importance      = get_param(kwargs, "distill_importance", default_val=distill_importance)
-    nl_importance           = get_param(kwargs, "nl_importance", default_val=nl_importance)
-    nl_bc_importance        = get_param(kwargs, "nl_bc_importance", default_val=nl_bc_importance)
-    nl_ic_importance        = get_param(kwargs, "nl_ic_importance", default_val=nl_ic_importance)
-    ewc_importance          = get_param(kwargs, "ewc_importance", default_val=ewc_importance)
-
-    actual_res_weight           = get_param(kwargs, "res_weight", default_val=actual_res_weight)
-    actual_out_weight           = get_param(kwargs, "out_weight", default_val=actual_out_weight)
-    actual_der_weight           = get_param(kwargs, "der_weight", default_val=actual_der_weight)
-    actual_derx_weight           = get_param(kwargs, "derx_weight", default_val=actual_derx_weight)
-    actual_dert_weight           = get_param(kwargs, "dert_weight", default_val=actual_dert_weight)
-    actual_hes_weight           = get_param(kwargs, "hes_weight", default_val=actual_hes_weight)
-    actual_hesx_weight           = get_param(kwargs, "hesx_weight", default_val=actual_hesx_weight)
-    actual_hest_weight           = get_param(kwargs, "hest_weight", default_val=actual_hest_weight)
-    actual_bc_weight            = get_param(kwargs, "bc_weight", default_val=actual_bc_weight)
-    actual_ic_weight            = get_param(kwargs, "ic_weight", default_val=actual_ic_weight)
-    monitor_conflicts           = get_param(kwargs, "monitor_conflicts", default_val=monitor_conflicts)
 
     if lr_init is None or (type(lr_init) is list and lr_init == []):
         lr_init = [1e-3]
@@ -304,25 +189,6 @@ def start_train(config: dict|str, **kwargs):
             scheduler = False
         else:
             scheduler = True
-    
-    importances = []
-    for imp in [actual_importance, actual_bc_importance, actual_ic_importance, nl_importance, nl_bc_importance, nl_ic_importance, distill_importance, ewc_importance]:
-        if imp is None or (type(imp) is list and imp == []):
-            imp = [1.0]
-        if type(imp) is list:
-            imp = [float(i) for i in imp]
-        else:
-            imp = [float(imp)]
-        importances.append(imp)
-    
-    actual_importance = importances[0]
-    actual_bc_importance = importances[1]
-    actual_ic_importance = importances[2]
-    nl_importance = importances[3]
-    nl_bc_importance = importances[4]
-    nl_ic_importance = importances[5]
-    distill_importance = importances[6]
-    ewc_importance = importances[7]
     
     torch.manual_seed(seed)
     random.seed(seed)
@@ -414,14 +280,6 @@ def start_train(config: dict|str, **kwargs):
     else: # initial_time_mode == "Separated"
         train_initial = extract_TensorDataset(train_dataset, time_indexes=[t_points[0]], spatial_ranges=actual_subset)
         val_initial = extract_TensorDataset(val_dataset, time_indexes=[t_points[0]], spatial_ranges=actual_subset)
-        
-        # train_dataset_list = train_dataset.datasets
-        # train_dataset_list[0] = extract_interior(train_dataset_list[0])
-        # train_dataset = ConcatDataset(train_dataset_list)
-
-        # val_dataset_list = train_dataset.datasets
-        # val_dataset_list[0] = extract_interior(val_dataset_list[0])
-        # val_dataset = ConcatDataset(val_dataset_list)
 
         if pde_at_t0:
             train_dataset = extract_TensorDataset(train_dataset, time_indexes=t_points, spatial_ranges=actual_subset)
@@ -430,20 +288,9 @@ def start_train(config: dict|str, **kwargs):
             train_dataset = extract_TensorDataset(train_dataset, time_indexes=t_points[1:], spatial_ranges=actual_subset)
             val_dataset = extract_TensorDataset(val_dataset, time_indexes=t_points[1:], spatial_ranges=actual_subset)
 
-    #if nl_dataset is not None:
-    #    nl_dataset = extract_TensorDataset(nl_dataset, spatial_ranges=nl_subset)
     if boundary_mode is None and space_in_input:
         raise ValueError("Missing boundary mode.")
-        #if "PINN" not in actual_mode:
-        #    boundary_mode = "Local+Joined"
-        #else:
-        #    boundary_mode = "LocalFull+Separated"
-    #if boundary_mode == "Joined":
-    #    train_dataset = extract_TensorDataset(train_dataset, spatial_ranges=actual_subset)
-    #    val_dataset = extract_TensorDataset(val_dataset, spatial_ranges=actual_subset)
-    #    
-    #    train_boundary = None
-    #    val_boundary = None
+        
     if boundary_mode is not None:
         if boundary_mode == "Global":
             train_boundary = extract_boundary(
@@ -481,9 +328,6 @@ def start_train(config: dict|str, **kwargs):
             else:
                 train_dataset = extract_TensorDataset(train_dataset, spatial_ranges=actual_subset)
                 val_dataset = extract_TensorDataset(val_dataset, spatial_ranges=actual_subset)
-            #train_dataset = merge_datasets(train_interior, train_boundary)
-            #if val_dataset is not None:
-            #    val_dataset = merge_datasets(val_interior, val_boundary)
 
         elif "Local" in boundary_mode:
             train_dataset = extract_TensorDataset(train_dataset, spatial_ranges=actual_subset)
@@ -522,7 +366,6 @@ def start_train(config: dict|str, **kwargs):
                 train_dataset = extract_TensorDataset(train_interior, spatial_ranges=actual_subset)
                 val_dataset = extract_TensorDataset(val_interior, spatial_ranges=actual_subset)
 
-            #if "Full" not in boundary_mode:
             train_boundary = extract_TensorDataset(train_boundary, spatial_ranges=actual_subset)
             val_boundary = extract_TensorDataset(val_boundary, spatial_ranges=actual_subset)
     else:
@@ -568,8 +411,6 @@ def start_train(config: dict|str, **kwargs):
             else:
                 nl_dataset = extract_TensorDataset(nl_dataset, time_indexes=t_points[1:], spatial_ranges=nl_subset)
 
-        #if boundary_mode_nl is None and space_in_input:
-        #    raise ValueError("Missing nl boundary mode.")
         if boundary_mode_nl is not None:
             if boundary_mode_nl == "Global":
                 nl_boundary = extract_boundary(
@@ -816,8 +657,7 @@ def start_train(config: dict|str, **kwargs):
             input_units=input_units,
             hidden_units=layers,
             device=device,
-            activation=torch.nn.Tanh(),    
-            last_activation=False
+            activation=torch.nn.Tanh()
             ).to(device)
         
     if actual_model.time_in_input:
@@ -910,9 +750,6 @@ def start_train(config: dict|str, **kwargs):
     config_dict["Actual"]["bc_weight"] = actual_bc_weight
     config_dict["Actual"]["ic_weight"] = actual_ic_weight
     config_dict["Actual"]["monitor_conflicts"] = monitor_conflicts
-    config_dict["Actual"]["importance"] = actual_importance
-    config_dict["Actual"]["bc_importance"] = actual_bc_importance
-    config_dict["Actual"]["ic_importance"] = actual_ic_importance
     config_dict["Actual"]["mode"] = actual_mode
     config_dict["Actual"]["layers"] = layers
     config_dict["Actual"]["fourier_features"] = actual_model.fourier_features
@@ -931,11 +768,8 @@ def start_train(config: dict|str, **kwargs):
     config_dict["Unlabeled"]["buffer_size_bc"] = memory_buffer_size_nl_bc
     config_dict["Unlabeled"]["buffer_size_ic"] = memory_buffer_size_nl_ic
     config_dict["Unlabeled"]["weight"] = nl_weight
-    config_dict["Unlabeled"]["importance"] = nl_importance
     config_dict["Unlabeled"]["bc_weight"] = nl_bc_weight
-    config_dict["Unlabeled"]["bc_importance"] = nl_bc_importance
     config_dict["Unlabeled"]["ic_weight"] = nl_ic_weight
-    config_dict["Unlabeled"]["ic_importance"] = nl_ic_importance
     config_dict["Unlabeled"]["boundary"] = boundary_mode_nl
     config_dict["Unlabeled"]["initial_time"] = initial_time_mode_nl
 
@@ -952,7 +786,6 @@ def start_train(config: dict|str, **kwargs):
     config_dict["Distillation"]["hes_weight"] = distill_hes_weight
     config_dict["Distillation"]["hesx_weight"] = distill_hesx_weight
     config_dict["Distillation"]["hest_weight"] = distill_hest_weight
-    config_dict["Distillation"]["importance"] = distill_importance
 
     if config_dict.get("EWC") is None:
         config_dict["EWC"] = {}
@@ -964,7 +797,6 @@ def start_train(config: dict|str, **kwargs):
     config_dict["EWC"]["auto_weighting"] = ewc_auto_weighting
     config_dict["EWC"]["warm_up"] = ewc_warm_up
     config_dict["EWC"]["decay"] = ewc_decay_factor
-    config_dict["EWC"]["importance"] = ewc_importance
     config_dict["EWC"]["src_fisher_diag_file"] = ewc_src_fisher_file
     config_dict["EWC"]["dst_fisher_diag_file"] = ewc_dst_fisher_file
     config_dict["EWC"]["moving_avg_factor"] = ewc_moving_avg_factor
@@ -1008,7 +840,6 @@ def start_train(config: dict|str, **kwargs):
     objective = Objective(
         seed = seed,
         model = actual_model,
-        importances = importances,
         train_steps = train_steps,
         epochs = epochs,
         early_stop_value = early_stop_value,
@@ -1032,13 +863,18 @@ def start_train(config: dict|str, **kwargs):
         delayed_weights=delayed_weights,
         device = device,
         models_dir = models_dir,
-        suggestions=suggestions
+        suggestions=suggestions,
+        reset=True
         )
 
-    if pruner == "threshold":
+    if pruner == "Hyperband":
+        opt_pruner = optuna.pruners.HyperbandPruner(min_resource=5, max_resource=epochs, reduction_factor=3)
+    elif pruner == "Median":
+        opt_pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=n_warmup_steps, interval_steps=1)
+    elif pruner == "Threshold":
         opt_pruner = optuna.pruners.ThresholdPruner(upper=threshold, n_warmup_steps=n_warmup_steps)
     else:
-        opt_pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=n_warmup_steps, interval_steps=1)
+        raise ValueError(f"Unknown pruner '{pruner}'.")
     
     sampler = optuna.samplers.TPESampler(seed=seed)
     study = optuna.create_study(direction = "minimize", pruner=opt_pruner, sampler=sampler)

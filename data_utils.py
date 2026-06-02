@@ -8,7 +8,7 @@ This module provides some functions for datasets manipulation.
 import torch
 from torch.utils.data import TensorDataset, ConcatDataset
 import os
-from generate import X, U, DU, D2U, RESIDUAL_KEYS, RESIDUAL_VALUES, PDE_VALUES, IC_VALUES, TIMES, OUTWARD_NORMAL
+from generate import X, U, DU, D2U, RESIDUAL_KEYS, RESIDUAL_VALUES, PDE_VALUES, IC_VALUES, TIMES
 from model import PdeNet
 from load_store_utils import resume_model
 from pde_utils import Pde, key_idx, key_str, ic_key_idx
@@ -16,44 +16,6 @@ from typing import Tuple, List
 
 DIM_LABEL_DICT = {"x": 0, "y": 1, "r": 2}
 
-BOUNDARY = 0
-DOMAIN = 1
-
-def plot_subsample(
-        dataset: TensorDataset,
-        indices: list,
-        vmin: float = None,
-        vmax: float = None
-    ) -> None:
-    """
-    Plot the function at a subsample of the points in dataset (the rows whose index is in indices).
-
-    Parameters
-    ----------
-    dataset : TensorDataset
-        The full dataset.
-    indices : list
-        The subset of points (rows) to plot.
-    vmin : float
-    vmax : float
-    
-    Returns
-    -------
-    None
-    """
-    if vmin is not None: vmin = [vmin]
-    if vmax is not None: vmax = [vmax]
-    plot_points(
-        dataset = TensorDataset(
-            dataset.tensors[X][indices],
-            dataset.tensors[U][indices]
-        ),
-        points_idx = 0,
-        labels_idx = 1,
-        figsize = (2.8, 2),
-        vmin = vmin,
-        vmax = vmax
-    )
 
 def get_dictionary(keys: torch.Tensor, values: torch.Tensor, pde_name: str) -> dict:
     """
@@ -283,33 +245,6 @@ def replace_labels(dataset: TensorDataset, labels: torch.Tensor) -> TensorDatase
     cols[U] = labels
     return TensorDataset(*cols)
 
-def subset_to_tensordataset(subset: torch.utils.data.Subset) -> TensorDataset:
-    """
-    Convert a torch Subset into a torch TensorDataset.
-
-    Parameters
-    ----------
-    subset : torch.utils.data.Subset
-    
-    Returns
-    -------
-    TensorDataset
-        The corresponding TensorDataset or None if subset is None.
-    """
-    if subset is None:
-        return None
-    
-    # Extract underlying dataset
-    base_dataset = subset.dataset
-    
-    # Get indices of the subset
-    indices = subset.indices
-    
-    # Build new tensors from those indices
-    tensors = [t[indices] for t in base_dataset.tensors]
-    
-    return TensorDataset(*tensors)
-
 def extract_boundary(
     dataset: ConcatDataset|TensorDataset, 
     shape: str = "rectangle",
@@ -424,32 +359,6 @@ def extract_interior(
         raise ValueError(f"Unrecognized {shape} boundary shape.")
     cols = filter_tensors(columns=cols, spatial_ranges=ranges, mode="open", shape=shape)
     return TensorDataset(*cols)
-
-def merge_datasets(*datasets: Tuple[TensorDataset]) -> TensorDataset:
-    """
-    Merge multiple TensorDatasets with the same number of columns.
-
-    Parameters
-    ----------
-    *datasets : Tuple[TensorDataset]
-        TensorDatasets to merge.
-
-    Returns
-    -------
-    TensorDataset
-    """
-    # Check all datasets have the same number of tensors per sample
-    n_cols = len(datasets[0].tensors)
-    for ds in datasets:
-        assert len(ds.tensors) == n_cols, "All datasets must have the same number of columns"
-    
-    # Concatenate corresponding columns
-    merged_tensors = [
-        torch.cat([ds.tensors[i] for ds in datasets], dim=0) 
-        for i in range(n_cols)
-    ]
-    
-    return TensorDataset(*merged_tensors)
 
 
 def compute_prediction_difference(
@@ -616,7 +525,7 @@ def extract_targets(dataset: str|TensorDataset, device="cpu") -> TensorDataset:
 
     return TensorDataset(*tensors)
 
-def prepare_dataset(datasets: list[TensorDataset], samples_per_dataset: int, plot: bool = False, seed: int = 42) -> ConcatDataset:
+def prepare_dataset(datasets: list[TensorDataset], samples_per_dataset: int, seed: int = 42) -> ConcatDataset:
     """
     Randomly permute and subsample datasets (seed for reproducibility), and then combine the result in a ConcatDataset.
 
@@ -624,7 +533,6 @@ def prepare_dataset(datasets: list[TensorDataset], samples_per_dataset: int, plo
     ----------
     datasets : list[TensorDataset]
     samples_per_dataset : int
-    plot : bool
     seed : int
 
     Returns
@@ -636,7 +544,6 @@ def prepare_dataset(datasets: list[TensorDataset], samples_per_dataset: int, plo
     for ds, seed in zip(datasets, seeds):
         torch.manual_seed(seed)
         indices = torch.randperm(len(ds))[:samples_per_dataset]
-        if plot: plot_subsample(ds, indices)
         new_cols = [col[indices] for col in ds.tensors]
         if cols is None:
             cols = new_cols

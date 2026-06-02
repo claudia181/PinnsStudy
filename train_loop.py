@@ -18,15 +18,15 @@ import numpy as np
 import random
 from itertools import cycle
 from model import PdeNet, LOSS_TERMS
-from torch.optim import LBFGS, Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, LambdaLR
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR
 import time
 import math
 import itertools
 from itertools import cycle
 import optuna
 from pde_utils import key_str, key_idx, ic_key_idx
-from generate import X, U, DU, D2U, OUTWARD_NORMAL, PDE_KEYS, PDE_VALUES, IC_KEYS, IC_VALUES, RESIDUAL_KEYS, RESIDUAL_VALUES
+from generate import X, U, DU, D2U, OUTWARD_NORMAL, PDE_VALUES, IC_VALUES, RESIDUAL_KEYS, RESIDUAL_VALUES
 
 def get_dictionary(keys: torch.Tensor, values: torch.Tensor, pde_name: str) -> dict:
     """
@@ -45,8 +45,9 @@ def get_dictionary(keys: torch.Tensor, values: torch.Tensor, pde_name: str) -> d
     dictionary = {}
     keys = keys[0].tolist()
     values = [values[:, i] for i in range(values.shape[1])]
-    for key, value in zip([key_str(k, pde_name) for k in keys], [v for v in values]):
-        if len(value) == 1: value = value.item()
+    for key, value in zip([key_str(k, pde_name) for k in keys], values):
+        if len(value) == 1:
+            value = value.item()
         dictionary[key] = value
     return dictionary
 
@@ -113,6 +114,10 @@ def train_loop(
         Training boundary dataset (points in bd(D)).
     train_ic_dataset : TensorDataset
         Training initial condition dataset (points in D at t0).
+    nl_bc_dataset : TensorDataset
+        Unlabeled training boundary dataset (points in bd(D)).
+    nl_ic_dataset : TensorDataset
+        Unlabeled training initial condition dataset (points in D at t0).    
     val_bc_dataset : TensorDataset
         Validation boundary dataset (points in bd(D)).
     val_ic_dataset : TensorDataset

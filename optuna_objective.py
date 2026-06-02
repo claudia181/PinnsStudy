@@ -25,61 +25,10 @@ import copy
 class Objective:
     """
     Class representing an objective wrt which the optuna engine perform model selection.
-
-    Attributes
-    ----------
-    model : PdeNet
-        PINN to train.
-    importances : list
-        Loss terms importances.
-    train_steps : int
-        Number of training steps.
-    epochs : int
-        Number of epochs.
-    eval_every :  int
-        Evaluation period.
-    batch_size : list
-        Batch size.
-    lr_init : list
-        Initial learning rate.
-    clip_grad : bool
-        If True, the gradient norm is clipped to 1.
-    fourier_features : list
-        Fourier features.
-    frequency_variance : list
-        Variance of the 0-centered Gaussian distribution 
-        from which the frequency mtx for Fourier features are sampled.
-    scheduler_mode : str
-        Learning rate scheduler mode ("ExpDec" | "CosAnn" | None).
-    train_dataset : TensorDataset
-        Labeled training set.
-    nl_dataset : TensorDataset
-        Unlabeled training set.
-    val_dataset : TensorDataset
-        Validation set.
-    train_bc_dataset : TensorDataset
-        Boundary training set.
-    train_ic_dataset : TensorDataset
-        Initial condition training set.
-    val_bc_dataset : TensorDataset
-        Boundary validation set.
-    val_ic_dataset : TensorDataset
-        Initial condition validation set.
-    distill_dataset : TensorDataset
-        Distillation set.
-    models_dir : str
-        Folder where to store the models files.
-    device: str
-    seed : int
-    suggestions : bool
-        If True, hyperparameter search is performed.
-    count : int
-"""
-
+    """
     def __init__(
             self,
             model: PdeNet,
-            importances: list,
             train_steps: int,
             epochs: int,
             early_stop_value: float,
@@ -90,7 +39,6 @@ class Objective:
             fourier_features: list,
             frequency_variance: list,
             scheduler_mode: str,
-            delayed_weights: bool,
             train_dataset: TensorDataset,
             nl_dataset: TensorDataset,
             val_dataset: TensorDataset,
@@ -114,8 +62,6 @@ class Objective:
         ----------
         model : PdeNet
             PINN to train.
-        importances : list
-            Loss terms importances.
         train_steps : int
             Number of training steps.
         epochs : int
@@ -138,8 +84,6 @@ class Objective:
             from which the frequency mtx for Fourier features are sampled.
         scheduler_mode : bool
             Learning rate scheduler ("ExpDec" | "CosAnn" | None).
-        delayed_weights : bool
-            If True, delayed weights are used in training.
         train_dataset : TensorDataset
             Labeled training set.
         nl_dataset : TensorDataset
@@ -150,6 +94,10 @@ class Objective:
             Boundary training set.
         train_ic_dataset : TensorDataset
             Initial condition training set.
+        nl_bc_dataset : TensorDataset
+            Unlabeled boundary training set.
+        nl_ic_dataset : TensorDataset
+            Unlabeled initial condition training set.
         val_bc_dataset : TensorDataset
             Boundary validation set.
         val_ic_dataset : TensorDataset
@@ -162,16 +110,10 @@ class Objective:
         seed : int
         suggestions : str
             If 'On', hyperparameter search is performed.
+        reset : bool
+            If True, reset the model after the trial.
         """
         self.model = model
-        self.sys_importance = importances[0]
-        self.bc_importance = importances[1]
-        self.ic_importance = importances[2]
-        self.nl_importance = importances[3]
-        self.nl_bc_importance = importances[4]
-        self.nl_ic_importance = importances[5]
-        self.distill_importance = importances[6]
-        self.ewc_importance = importances[7]
         self.train_steps = train_steps
         self.epochs = epochs
         self.early_stop_value = early_stop_value
@@ -194,7 +136,6 @@ class Objective:
         self.fourier_features = fourier_features
         self.frequency_variance = frequency_variance
         self.scheduler_mode = scheduler_mode
-        self.delayed_weights = delayed_weights
         self.models_dir = models_dir
         self.models = []
         if suggestions == "On":
@@ -246,46 +187,6 @@ class Objective:
         
         self.model.set_fourier_features(fourier_features, frequency_variance)
         
-        if len(self.sys_importance) > 1 and self.suggestions:
-            self.model.sys_importance = trial.suggest_categorical("sys_importance", self.sys_importance)
-        else:
-            self.model.sys_importance = self.sys_importance[min(self.count, len(self.sys_importance)-1)]
-
-        if len(self.bc_importance) > 1 and self.suggestions:
-            self.model.bc_importance = trial.suggest_categorical("bc_importance", self.bc_importance)
-        else:
-            self.model.bc_importance = self.bc_importance[min(self.count, len(self.bc_importance)-1)]
-
-        if len(self.ic_importance) > 1 and self.suggestions:
-            self.model.ic_importance = trial.suggest_categorical("ic_importance", self.ic_importance)
-        else:
-            self.model.ic_importance = self.ic_importance[min(self.count, len(self.ic_importance)-1)]
-
-        if len(self.nl_importance) > 1 and self.suggestions:
-            self.model.nl_importance = trial.suggest_categorical("nl_importance", self.nl_importance)
-        else:
-            self.model.nl_importance = self.nl_importance[min(self.count, len(self.nl_importance)-1)]
-        
-        if len(self.nl_bc_importance) > 1 and self.suggestions:
-            self.model.nl_bc_importance = trial.suggest_categorical("nl_bc_importance", self.nl_bc_importance)
-        else:
-            self.model.nl_bc_importance = self.nl_bc_importance[min(self.count, len(self.nl_bc_importance)-1)]
-
-        if len(self.nl_ic_importance) > 1 and self.suggestions:
-            self.model.nl_ic_importance = trial.suggest_categorical("nl_ic_importance", self.nl_ic_importance)
-        else:
-            self.model.nl_ic_importance = self.nl_ic_importance[min(self.count, len(self.nl_ic_importance)-1)]
-
-        if len(self.distill_importance) > 1 and self.suggestions:
-            self.model.distill_importance = trial.suggest_categorical("distill_importance", self.distill_importance)
-        else:
-            self.model.distill_importance = self.distill_importance[min(self.count, len(self.distill_importance)-1)]
-
-        if len(self.ewc_importance) > 1 and self.suggestions:
-            self.model.ewc_importance = trial.suggest_categorical("ewc_importance", self.ewc_importance)
-        else:
-            self.model.ewc_importance = self.ewc_importance[min(self.count, len(self.ewc_importance)-1)]
-        
         self.count += 1
 
         # Run the training loop and get the statistics
@@ -296,7 +197,6 @@ class Objective:
             batch_size=batch_size,
             clip_grad = self.clip_grad,
             scheduler_mode=self.scheduler_mode,
-            delayed_weights=self.delayed_weights,
             epochs = self.epochs,
             early_stop_value = self.early_stop_value,
             train_dataset = self.train_dataset,
