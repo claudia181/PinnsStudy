@@ -198,7 +198,7 @@ class AdvectionReactionDiffusion:
     s : Callable
         Real valued source function.
     implicit_source : str
-        Implicit source, i.e. use u, "logistic", "Arrhenius", "AllenCahn" or "CahnHiliard".
+        Implicit source, i.e. use u, "logistic", "Arrhenius" or "AllenCahn".
     A : float
         Implicit source parameter.
     B : float
@@ -277,7 +277,7 @@ class AdvectionReactionDiffusion:
         source : Callable
             Source function.
         implicit_source : str
-            Logistic, Arrhenius, AllenCahn or CahnHiliard.
+            Logistic, Arrhenius or AllenCahn.
         A : float
         B : float
 
@@ -565,10 +565,10 @@ class AdvectionReactionDiffusion:
         -------
         None
         """
-        if self.implicit_source["name"] == "CahnHiliard":
-            rho = CellVariable(name="rho", mesh=self.mesh, hasOld=True)
-        else:
-            rho = CellVariable(name="rho", mesh=self.mesh)  
+        #if self.implicit_source["name"] == "CahnHiliard":
+        #    rho = CellVariable(name="rho", mesh=self.mesh, hasOld=True)
+        #else:
+        rho = CellVariable(name="rho", mesh=self.mesh)  
         mu = CellVariable(name="mu", mesh=self.mesh)
 
         rho.setValue(self.u0)  # initial density
@@ -602,10 +602,10 @@ class AdvectionReactionDiffusion:
             datamin = vmin
             datamax = vmax
         if self.shape == "rectangle":
-            if self.implicit_source["name"] == "CahnHiliard":
-                viewer = Viewer(vars=mu, cmap=cmap, datamin=datamin, datamax=datamax)
-            else:
-                viewer = Viewer(vars=rho, cmap=cmap, datamin=datamin, datamax=datamax)
+            #if self.implicit_source["name"] == "CahnHiliard":
+            #    viewer = Viewer(vars=mu, cmap=cmap, datamin=datamin, datamax=datamax)
+            #else:
+            viewer = Viewer(vars=rho, cmap=cmap, datamin=datamin, datamax=datamax)
             fig = plt.gcf()
             fig.set_size_inches(figsize[0], figsize[1])
 
@@ -694,18 +694,18 @@ class AdvectionReactionDiffusion:
             else:
                 implicit_source_term = 0.0
 
-            if self.implicit_source["name"] == "CahnHiliard":
-                eq_mu = ImplicitSourceTerm(1, var=mu) == self.implicit_source["A"] * (rho**2 - 1) * rho - DiffusionTerm(coeff=self.implicit_source["B"], var=rho)
+            #if self.implicit_source["name"] == "CahnHiliard":
+            #    eq_mu = ImplicitSourceTerm(1, var=mu) == self.implicit_source["A"] * (rho**2 - 1) * rho - DiffusionTerm(coeff=self.implicit_source["B"], var=rho)
 
-                eq_rho = TransientTerm(var=rho) == DiffusionTerm(coeff=self.D, var=mu)
+            #    eq_rho = TransientTerm(var=rho) == DiffusionTerm(coeff=self.D, var=mu)
 
-                rho.updateOld()
+            #    rho.updateOld()
 
-                eq_mu.solve(var=mu)
-                eq_rho.solve(var=rho, dt=dt)
-            else:
-                eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
-                eq.solve(var=rho, dt=dt)
+            #    eq_mu.solve(var=mu)
+            #    eq_rho.solve(var=rho, dt=dt)
+            #else:
+            eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
+            eq.solve(var=rho, dt=dt)
         
             u[-3] = u[-2]
             u[-2] = u[-1]
@@ -750,8 +750,8 @@ class AdvectionReactionDiffusion:
         u: torch.Tensor,
         du: torch.Tensor,
         d2u: torch.Tensor,
-        lap: torch.Tensor,
-        lap2: torch.Tensor,
+        #lap: torch.Tensor,
+        #lap2: torch.Tensor,
         vx: torch.Tensor, 
         vy: torch.Tensor,
         D: float,
@@ -780,7 +780,7 @@ class AdvectionReactionDiffusion:
         source : torch.Tensor
             Source values; if None, it means that the source is implicit.
         implicit_source : str
-            AllenCahn | CahnHiliard | logistic | Arrhenius.
+            AllenCahn | logistic | Arrhenius.
         A : float
             Implicit source parameter.
         B : float
@@ -817,17 +817,16 @@ class AdvectionReactionDiffusion:
             source_term = source
         else:
             source_term = 0.0
-        if implicit_source == "CahnHiliard":
-            return dut - 6*u*(dux**2 + duy**2) - (3*u**2-1)*lap + D*lap2
+        #if implicit_source == "CahnHiliard":
+        #    return dut - 6*u*(dux**2 + duy**2) - (3*u**2-1)*lap + D*lap2
 
+        #else:
+        if implicit_source == "AllenCahn":
+            implicit_source_term = A * (u**3 - u)
+        elif implicit_source == "logistic":
+            implicit_source_term = A * u**2 - B * u
+        elif implicit_source == "Arrhenius":
+            implicit_source_term = A * np.exp(- B / u)
         else:
-            if implicit_source == "AllenCahn":
-                implicit_source_term = A * (u**3 - u)
-            elif implicit_source == "logistic":
-                implicit_source_term = A * u**2 - B * u
-            elif implicit_source == "Arrhenius":
-                implicit_source_term = A * np.exp(- B / u)
-            else:
-                implicit_source_term = 0.0
-
-            return dut + vx * dux + vy * duy + implicit_source_term - source_term - diffusion_term
+            implicit_source_term = 0.0
+        return dut + vx * dux + vy * duy + implicit_source_term - source_term - diffusion_term

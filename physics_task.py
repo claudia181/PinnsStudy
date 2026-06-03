@@ -1,5 +1,8 @@
 from typing import Callable
 import torch
+from advection_reaction_diffusion import AdvectionReactionDiffusion
+from allen_cahn import AllenCahn
+from model2 import Pinn
 
 TASKS = ["PDE", "Output", "Derivative", "Derivative_x", "Derivative_t", "Hessian", "Hessian_x", "Hessian_t"]
 
@@ -23,11 +26,16 @@ class PhysicsTask:
         
         """
         self.id = task_id
-        self.parameters = parameters
+        if parameters is None:
+            self.parameters = {}
+        else:
+            self.parameters = parameters
         self._lhs = lhs
         self.loss = loss
         self.weight = weight
         self.grad_norm = None
+        self.grad = None
+        self.conflict = None
         self.loss_value = None
         self.device = device
     
@@ -37,9 +45,13 @@ class PhysicsTask:
             du: torch.Tensor = None,
             d2u: torch.Tensor = None,
             lap: torch.Tensor = None,
-            lap2: torch.Tensor = None
+            lap2: torch.Tensor = None,
+            variable_parameters: dict = None
         ) -> torch.Tensor:
-        return self._lhs(u=u, du=du, d2u=d2u, lap=lap, lap2=lap2, n=n, **self.parameters)
+        if variable_parameters is None:
+            variable_parameters = {}
+        all_parameters = self.parameters | variable_parameters
+        return self._lhs(u=u, du=du, d2u=d2u, lap=lap, lap2=lap2, n=n, **all_parameters)
 
 
 class NeumannBCTask(PhysicsTask):
@@ -50,8 +62,9 @@ class NeumannBCTask(PhysicsTask):
             outward_flux = (du[:, :2] * n).sum(dim=1)
             return outward_flux
 
-        def loss(du: torch.Tensor, du_pred: torch.tensor, n: torch.Tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, du: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            du_pred = model.derivative(order=1, x=x, pde_params=variable_params)
             return mse_loss(lhs(du=du_pred, n=n), lhs(du=du, n=n))
         
         super().__init__(
@@ -61,6 +74,9 @@ class NeumannBCTask(PhysicsTask):
             weight=weight,
             device=device
         )
+    
+    def loss_inputs(self):
+        return ["du", "n"]
 
 class DirichletBCTask(PhysicsTask):
 
@@ -69,8 +85,9 @@ class DirichletBCTask(PhysicsTask):
         def lhs(u: torch.Tensor) -> torch.Tensor:
             return u
 
-        def loss(u: torch.Tensor, u_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            u_pred = model.forward(x=x, pde_params=variable_params)
             return mse_loss(u_pred, u)
         
         super().__init__(
@@ -80,7 +97,10 @@ class DirichletBCTask(PhysicsTask):
             weight=weight,
             device=device
         )
-
+    
+    def loss_inputs(self):
+        return ["u"]
+    
 class ICTask(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
@@ -88,8 +108,9 @@ class ICTask(PhysicsTask):
         def lhs(u: torch.Tensor) -> torch.Tensor:
             return u
 
-        def loss(u: torch.Tensor, u_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            u_pred = model.forward(x=x, pde_params=variable_params)
             return mse_loss(u_pred, u)
         
         super().__init__(
@@ -99,13 +120,17 @@ class ICTask(PhysicsTask):
             weight=weight,
             device=device
         )
-
+    
+    def loss_inputs(self):
+        return ["u"]
+    
 class OutputTask(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(u: torch.Tensor, u_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            u_pred = model.forward(x=x, pde_params=variable_params)
             return mse_loss(u_pred, u)
         
         super().__init__(
@@ -114,13 +139,17 @@ class OutputTask(PhysicsTask):
             weight=weight,
             device=device
         )
-
+    
+    def loss_inputs(self):
+        return ["u"]
+    
 class DerivativeTask(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(du: torch.Tensor, du_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            du_pred = model.derivative(order=1, x=x, pde_params=variable_params)
             return mse_loss(du_pred, du)
         
         super().__init__(
@@ -129,13 +158,17 @@ class DerivativeTask(PhysicsTask):
             weight=weight,
             device=device
         )
-
+    
+    def loss_inputs(self):
+        return ["du"]
+    
 class SpatialDerivativeTask(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(du: torch.Tensor, du_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            du_pred = model.derivative(order=1, x=x, pde_params=variable_params)
             return mse_loss(du_pred[:, :2], du[:, :2])
         
         super().__init__(
@@ -144,13 +177,17 @@ class SpatialDerivativeTask(PhysicsTask):
             weight=weight,
             device=device
         )
-
+    
+    def loss_inputs(self):
+        return ["du"]
+    
 class TemporalDerivativeTask(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(du: torch.Tensor, du_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            du_pred = model.derivative(order=1, x=x, pde_params=variable_params)
             return mse_loss(du_pred[:, 2:], du[:, 2:])
         
         super().__init__(
@@ -159,48 +196,135 @@ class TemporalDerivativeTask(PhysicsTask):
             weight=weight,
             device=device
         )
+    
+    def loss_inputs(self):
+        return ["du"]
 
 class Derivative2Task(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(d2u: torch.Tensor, d2u_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            d2u_pred = model.derivative(order=2, x=x, pde_params=variable_params)
             return mse_loss(d2u_pred, d2u)
         
         super().__init__(
-            task_id="Derivative",
+            task_id="Derivative2",
             loss=loss,
             weight=weight,
             device=device
         )
+    
+    def loss_inputs(self):
+        return ["d2u"]
 
 class SpatialDerivative2Task(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(d2u: torch.Tensor, d2u_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            d2u_pred = model.derivative(order=2, x=x, pde_params=variable_params)
             return mse_loss(d2u_pred[:, :2, :2], d2u[:, :2, :2])
         
         super().__init__(
-            task_id="Derivative_x",
+            task_id="Derivative2_x",
             loss=loss,
             weight=weight,
             device=device
         )
+    
+    def loss_inputs(self):
+        return ["d2u"]
 
 class TemporalDerivative2Task(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
-        def loss(d2u: torch.Tensor, d2u_pred: torch.tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
+            d2u_pred = model.derivative(order=2, x=x, pde_params=variable_params)
             return mse_loss(d2u_pred[:, 2, 2], d2u[:, 2, 2])
         
         super().__init__(
-            task_id="Derivative_t",
+            task_id="Derivative2_t",
             loss=loss,
             weight=weight,
             device=device
         )
+    
+    def loss_inputs(self):
+        return ["d2u"]
+
+class AdvectionReactionDiffusionTask(PhysicsTask):
+
+    def __init__(self, parameters: dict, weight: float = None, device: str = "cpu"):
+        def lhs(
+                u: torch.Tensor, 
+                du: torch.Tensor, 
+                d2u: torch.Tensor,
+                variable_parameters: dict = None
+            ) -> torch.Tensor:
+            if variable_parameters is None:
+                variable_parameters = {}
+            all_parameters = self.parameters | variable_parameters
+            return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **all_parameters)
+
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn, u: torch.Tensor, du: torch.Tensor, d2u: torch.Tensor) -> torch.Tensor:
+
+            u = model.derivative(order=0, x=x, pde_params=variable_params)
+            du = model.derivative(order=1, x=x, pde_params=variable_params)
+            d2u = model.derivative(order=2, x=x, pde_params=variable_params)
+
+            mse_loss = torch.nn.MSELoss(reduction='mean')
+            variable_param_dict = dict(zip(model.pde_params_in_input, variable_params.T))
+            lhs_value = lhs(u=u, du=du, d2u=d2u, variable_parameters=variable_param_dict)
+            return mse_loss(lhs_value, torch.zeros_like(lhs_value))
+        
+        super().__init__(
+            task_id="AdvectionReactionDiffusionGE",
+            parameters=parameters,
+            lhs=lhs,
+            loss=loss,
+            weight=weight,
+            device=device
+        )
+    
+    def loss_inputs(self):
+        return ["u", "du", "d2u"]
+
+class StationaryAllenCahnTask(PhysicsTask):
+
+    def __init__(self, parameters: dict, weight: float = None, device: str = "cpu"):
+        def lhs(
+                u: torch.Tensor,
+                d2u: torch.Tensor,
+                variable_parameters: dict
+            ) -> torch.Tensor:
+            if variable_parameters is None:
+                variable_parameters = {}
+            all_parameters = self.parameters | variable_parameters
+            return AllenCahn.residual(u=u, d2u=d2u, **all_parameters)
+
+        def loss(x: torch.tensor, variable_params: torch.Tensor, model: Pinn) -> torch.Tensor:
+            mse_loss = torch.nn.MSELoss(reduction='mean')
+
+            u = model.derivative(order=0, x=x, pde_params=variable_params)
+            d2u = model.derivative(order=2, x=x, pde_params=variable_params)
+
+            variable_param_dict = dict(zip(model.pde_params_in_input, variable_params.T))
+            lhs_value = lhs(u=u, d2u=d2u, variable_parameters=variable_param_dict)
+            return mse_loss(lhs_value, torch.zeros_like(lhs_value))
+        
+        super().__init__(
+            task_id="StationaryAllenCahnGE",
+            parameters=parameters,
+            lhs=lhs,
+            loss=loss,
+            weight=weight,
+            device=device
+        )
+    
+    def loss_inputs(self):
+        return ["u", "d2u"]

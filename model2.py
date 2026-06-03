@@ -26,7 +26,8 @@ from pde_utils import Pde, key_idx, ic_key_idx, key_str
 from torch.utils.data import DataLoader
 import os
 from torch.utils.data import TensorDataset
-from typing import Tuple
+from physics_task import PhysicsTask
+from typing import Tuple, List
 from generate import X, U, DU, D2U, PDE_VALUES, IC_VALUES, GE_KEYS, GE_VALUES
 
 SYS_MODES       = ["Output", "PINN", "Derivative", "Derivative_x", "Derivative_t", "Hessian", "Hessian_x", "Hessian_t"]
@@ -83,35 +84,14 @@ class Pinn(torch.nn.Module):
             frequency_variance: float = 1.0,
             pde_params_in_input: list = [],
             ic_params_in_input: list = [],
-            sys_mode: str = "Output",
-            bc_mode: str = "Dirichlet",
-            distill_mode: str = "Forgetting",
+            task_list: List[PhysicsTask] = [],
             ewc_mode: str = "Off",
             dwa_mode: str = "Off",
             alpha: float = 0.9,
             moving_avg_frequency: int = 1,
             dwa_warm_up: int = 0,
             monitor_conflicts: bool = False,
-            bc_weight: float = 1.0,
-            ic_weight: float = 1.0,
-            ge_weight: float = 1.0,
-            out_weight: float = 1.0,
-            der_weight: float = 1.0,
-            derx_weight: float = 1.0,
-            dert_weight: float = 1.0,
-            hes_weight: float = 1.0,
-            hesx_weight: float = 1.0,
-            hest_weight: float = 1.0,
-            nl_weight: float = 1.0,
-            nl_bc_weight: float = 1.0,
-            nl_ic_weight: float = 1.0,
-            distill_out_weight: float = 1.0,
-            distill_der_weight: float = 1.0,
-            distill_derx_weight: float = 1.0,
-            distill_dert_weight: float = 1.0,
-            distill_hes_weight: float = 1.0,
-            distill_hesx_weight: float = 1.0,
-            distill_hest_weight: float = 1.0,
+            conflict_reference_task: int = 0,
             ewc_weight: float = 1.0,
             ewc_auto_weighting: bool = False,
             ewc_warm_up: int = 0,
@@ -150,12 +130,8 @@ class Pinn(torch.nn.Module):
             List of the keys identifying the PDE parameters provided in input to the model.
         ic_params_in_input : list
             List of the keys identifying the initial conditions parameters provided in input to the model.
-        sys_mode : str
-            Identify the loss term relative to the new learning (physics-informed, output, derivative, mixed, ...).
-        bc_mode : str
-            Identify the loss term relative to the boundary conditions ("Neumann" or "Dirichlet").
-        distill_mode : str
-            Identify the loss term relative to distillation.
+        task_list : List[PhysicsTask]
+            List of PhysicsTask objects (the training objectives).
         ewc_mode : str
             Elastic weight consolidation mode ("On" or "Off").
         dwa_mode : str
@@ -168,40 +144,6 @@ class Pinn(torch.nn.Module):
             Warm up steps for dynamic weight adaptation.
         monitor_conflicts : bool
             If True and DWA is active, the last cosine similarities btw the GE gradient and the other gradients are maintained in model.ge_conflicts.
-        bc_weight : float
-            Starting weight of the BC term.
-        ic_weight : float
-            Starting weight of the IC term.
-        ge_weight : float
-            Starting weight of the GE term.
-        out_weight : float
-            Starting weight of the output term.
-        der_weight : float
-            Starting weight of the 1st derivative term.
-        derx_weight : float
-            Starting weight of the 1st spatial derivative term.
-        dert_weight : float
-            Starting weight of the 1st temporal derivative term.
-        hes_weight : float
-            Starting weight of the 2nd derivative term.
-        hesx_weight : float
-            Starting weight of the 2nd spatial derivative term.
-        hest_weight : float
-            Starting weight of the 2nd temporal derivative term.
-        distill_out_weight : float
-            Starting weight of the distillation output term.
-        distill_der_weight : float
-            Starting weight of the distillation 1st derivative term.
-        distill_derx_weight : float
-            Starting weight of the distillation 1st spatial derivative term.
-        distill_dert_weight : float
-            Starting weight of the distillation 1st temporal derivative term.
-        distill_hes_weight : float
-            Starting weight of the distillation 2nd derivative term.
-        distill_hesx_weight : float
-            Starting weight of the distillation 2nd spatial derivative term.
-        distill_hest_weight : float
-            Starting weight of the distillation 2nd temporal derivative term.
         ewc_weight : float
             Starting weight of the elastic weight consolidation term.
         ewc_auto_weighting : bool
@@ -221,7 +163,6 @@ class Pinn(torch.nn.Module):
         # Set the parameters
         self.device = device
         self.pde = pde
-        self.bc_mode = bc_mode
         self.time_in_input = time_in_input
         self.space_in_input = space_in_input
         self.fourier_features = fourier_features
@@ -234,38 +175,12 @@ class Pinn(torch.nn.Module):
             self.B = None
         self.pde_params_in_input = pde_params_in_input
         self.ic_params_in_input = ic_params_in_input
-        items = sys_mode.split("+")
-        for item in items:
-            if item not in SYS_MODES:
-                raise ValueError(f"Unrecognized item '{item}' in 'sys_mode' (it must be in {SYS_MODES}).")
-        self.sys_mode = sys_mode
-        self.bc_weight = bc_weight
-        self.ic_weight = ic_weight
-        self.ge_weight = ge_weight
-        self.out_weight = out_weight
-        self.der_weight = der_weight
-        self.derx_weight = derx_weight
-        self.dert_weight = dert_weight
-        self.hes_weight = hes_weight
-        self.hesx_weight = hesx_weight
-        self.hest_weight = hest_weight
+        
         self.input_units = input_units
         self.hidden_units = hidden_units
-        self.nl_weight = nl_weight
-        self.nl_bc_weight = nl_bc_weight
-        self.nl_ic_weight = nl_ic_weight
-        items = distill_mode.split("+")
-        for item in items:
-            if item not in DISTILL_MODES:
-                raise ValueError(f"Unrecognized item '{item}' in 'sys_mode' (it must be in {DISTILL_MODES}).")
-        self.distill_mode = distill_mode
-        self.distill_out_weight = distill_out_weight
-        self.distill_der_weight = distill_der_weight
-        self.distill_derx_weight = distill_derx_weight
-        self.distill_dert_weight = distill_dert_weight
-        self.distill_hes_weight = distill_hes_weight
-        self.distill_hesx_weight = distill_hesx_weight
-        self.distill_hest_weight = distill_hest_weight
+
+        self.task_list = task_list
+        
         if ewc_mode not in EWC_MODES:
             raise ValueError(f"Parameter 'ewc_mode' must be in {EWC_MODES}, not {ewc_mode}.")
         self.ewc_mode = ewc_mode
@@ -281,6 +196,7 @@ class Pinn(torch.nn.Module):
             raise ValueError(f"Parameter 'dwa_mode' must be in {DWA_MODES}, not {dwa_mode}.")
         self.dwa_mode = dwa_mode
         self.monitor_conflicts = monitor_conflicts
+        self.conflict_reference_task = conflict_reference_task
         self.ge_conflicts = {
             "bc": 1.0, "ic": 1.0, 
             "out": 1.0, "der": 1.0, "derx": 1.0, "dert": 1.0, "hes": 1.0, "hesx": 1.0, "hest": 1.0, 
@@ -291,26 +207,6 @@ class Pinn(torch.nn.Module):
         self.moving_avg_frequency = moving_avg_frequency
         self.dwa_warm_up = dwa_warm_up
         self.moving_avg_count = 0
-        self.bc_last_norm = None
-        self.ic_last_norm = None
-        self.out_last_norm = None
-        self.der_last_norm = None
-        self.derx_last_norm = None
-        self.dert_last_norm = None
-        self.hes_last_norm = None
-        self.hesx_last_norm = None
-        self.hest_last_norm = None
-        self.ge_last_norm = None
-        self.nl_last_norm = None
-        self.nl_bc_last_norm = None
-        self.nl_ic_last_norm = None
-        self.distill_out_last_norm = None
-        self.distill_der_last_norm = None
-        self.distill_derx_last_norm = None
-        self.distill_dert_last_norm = None
-        self.distill_hes_last_norm = None
-        self.distill_hesx_last_norm = None
-        self.distill_hest_last_norm = None
         self.ewc_last_norm = None
         self.activation = activation
 
@@ -940,10 +836,7 @@ class Pinn(torch.nn.Module):
             #print(f"ewc_fisher_diag: {torch.mean(self.ewc_fisher_diag)}\nweights: {torch.mean((self.get_weights() - self.ewc_model_weights) ** 2)}")
         return ewc_loss
     
-    def _update_task_weights(
-            self,
-            loss_terms: dict
-            ) -> None:
+    def _update_task_weights(self) -> None:
         """
         Update the weight of each objective and the model state accordingly.
 
@@ -956,6 +849,22 @@ class Pinn(torch.nn.Module):
         -------
         None
         """
+
+        for task in self.task_list:
+            grad, grad_norm = self._compute_grad_norm(task.loss_value)
+            task.grad = grad
+            task.grad_norm = grad_norm
+
+        if self.monitor_conflicts:
+            reference_task = self.task_list[self.conflict_reference_task]
+            for task in self.task_list:
+                task.conflict = self._compute_cos_sim(task.grad, reference_task.grad, task.grad_norm, reference_task.grad_norm)
+        
+        norm_sum = sum([task.grad_norm for task in self.task_list])
+        
+        for task in self.task_list:
+            weight_new = norm_sum / task.
+
         ge_loss = loss_terms.get("ge_loss")
         out_loss = loss_terms.get("out_loss")
         der_loss = loss_terms.get("der_loss")
@@ -1705,6 +1614,46 @@ class Pinn(torch.nn.Module):
             weighted_loss += weighted_ewc_loss
         
         return weighted_loss
+    
+    def loss_fn(
+            self,
+            x_list: List[torch.Tensor],
+            variable_param_list: List[torch.Tensor] = None, # pde, ic
+            labels: dict = None
+    ) -> torch.Tensor:
+        if labels is None:
+            labels = {}
+        for i, task in enumerate(self.task_list):
+            x = x_list[i]
+            variable_params = variable_param_list[i]
+
+            l_dict = {}
+            for key in labels.keys():
+                if key in task.loss_inputs():
+                    l_dict[key] = labels[key][i]
+                else:
+                    raise ValueError("Missing input parameters")
+            
+            task.loss_value = task.loss(x=x, variable_params=variable_params, model=self, **l_dict)
+
+        if self.ewc_mode == "On":
+            ewc_loss_term = self._compute_loss_terms(
+                task="EWC"
+            )
+        else:
+            ewc_loss_term = 0.0
+
+        loss_terms = sys_loss_terms | bc_loss_term | ic_loss_term | nl_loss_term | nl_bc_loss_term | nl_ic_loss_term | distill_loss_terms | ewc_loss_term
+        if self.dwa_mode != "Off" and self.moving_avg_count % self.moving_avg_frequency == 0 and self.moving_avg_count >= self.dwa_warm_up:
+            self._update_task_weights(loss_terms)
+        else:
+            self._update_grad_norms(loss_terms)
+        self.moving_avg_count += 1
+
+        weighted_loss = self._compute_weighted_loss(loss_terms)
+
+        return weighted_loss   
+
 
     def loss_fn(self,
         x: torch.Tensor,
