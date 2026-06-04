@@ -430,10 +430,12 @@ def train_loop(
             d2u_train = train_data[D2U].to(device).float()
             pde_param_values = train_data[PDE_VALUES].to(device).float() # assumed sorted
             # pde_params_in_input sorted
+            param_values_train = None
             if pde_params_in_input is not []:
                 pde_param_values_train = pde_param_values[:, pde_params_in_input]
                 if torch.any(torch.isnan(pde_param_values_train)):
                     raise ValueError("Some pde parameters required in model input are not provided by train dataset.")
+                param_values_train = pde_param_values_train
             else:
                 pde_param_values_train = None
             
@@ -443,6 +445,10 @@ def train_loop(
                 ic_param_values_train = ic_param_values[:, ic_params_in_input]
                 if torch.any(torch.isnan(ic_param_values_train)):
                     raise ValueError("Some ic parameters required in model input are not provided by train dataset.")
+                if param_values_train is not None:
+                    param_values_train = torch.cat([param_values_train, ic_param_values_train], dim=-1)
+                else:
+                    param_values_train = ic_param_values
             else:
                 ic_param_values_train = None
 

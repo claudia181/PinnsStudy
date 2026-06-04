@@ -20,7 +20,7 @@ import torch
 from fipy import CellVariable, Grid2D, Gmsh2D, TransientTerm, ConvectionTerm, ImplicitSourceTerm, DiffusionTerm, Viewer, FaceVariable
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Callable, Any
+from typing import Callable, Any, List, Tuple
     
 def make_source(
         sigma: float = 1.0,
@@ -264,8 +264,7 @@ class AdvectionReactionDiffusion:
             implicit_source: str = None,
             A: float = None,
             B: float = None,
-            diffusion_coeff: float = None,
-            device="cpu"
+            diffusion_coeff: float = None
             ):
         """
         Constructor.
@@ -279,22 +278,22 @@ class AdvectionReactionDiffusion:
         implicit_source : str
             Logistic, Arrhenius or AllenCahn.
         A : float
+            Implicit source parameter.
         B : float
+            Implicit source parameter.
 
-        if implicit_source == "AllenCahn":\n
-            implicit_source_term = A * (u^3 - u)\n
-        elif implicit_source == "logistic":\n
-            implicit_source_term = A * u^2 - B * u\n
-        elif implicit_source == "Arrhenius":\n
-            implicit_source_term = A * np.exp(- B / u)\n
-        else:\n
-            implicit_source_term = 0.0
+            - if implicit_source == "AllenCahn":\n
+                implicit_source_term = A * (u^3 - u)\n
+            - elif implicit_source == "logistic":\n
+                implicit_source_term = A * u^2 - B * u\n
+            - elif implicit_source == "Arrhenius":\n
+                implicit_source_term = A * np.exp(- B / u)\n
+            - else:\n
+                implicit_source_term = 0.0
         
         diffusion_coeff : float
-            The diffusion coefficient of the PDE.
-        device : str
+            The diffusion coefficient of the PDE (default: 0).
         """
-        self.device = device
 
         if velocity is None:
             self.v = make_velocity(alpha_mode="const", beta_mode="const", alpha=1.0, beta=0.0)
@@ -422,7 +421,22 @@ class AdvectionReactionDiffusion:
             self.ymin, self.ymax = -radius, radius
 
 
-    def set_IC(self, gaussian: bool, periodic_circles: bool, periodic_valleys: bool, periodic_stripes: bool, periodic_grid: bool, uniform_noise: bool, u0: np.ndarray = None, centers: list = None, amps: list = None, sigmas: list = None, A: float = None, Ax: float = None, Ay: float = None, B: float = None, Bx: float = None, By: float = None, Cx: float = None, Cy: float = None, D: float = None, min_noise: float = None, max_noise: float = None) -> None:
+    def set_IC(
+            self, 
+            gaussian: bool, 
+            periodic_circles: bool, 
+            periodic_valleys: bool, 
+            periodic_stripes: bool, 
+            periodic_grid: bool, 
+            uniform_noise: bool, 
+            u0: np.ndarray = None, 
+            centers: List[Tuple[float, float]] = None, amps: List[float] = None, sigmas: List[float] = None, 
+            A: float = None, Ax: float = None, Ay: float = None, 
+            B: float = None, Bx: float = None, By: float = None, 
+            Cx: float = None, Cy: float = None, 
+            D: float = None, 
+            min_noise: float = None, max_noise: float = None
+            ) -> None:
         """
         Set the initial conditions.
 
@@ -470,7 +484,7 @@ class AdvectionReactionDiffusion:
         if periodic_stripes:
             self.u0 += A * np.sin(Bx * self.x + By * self.y) # stripes
         if periodic_grid:
-            self.u0 += Ax * np.sin(Bx * self.x**2 +Cx) + Ay * np.sin(By * self.y**2 + Cy)
+            self.u0 += Ax * np.sin(Bx * self.x**2 + Cx) + Ay * np.sin(By * self.y**2 + Cy)
         if uniform_noise:
             self.u0 += np.random.uniform(low=min_noise * np.ones_like(self.u0), high=max_noise * np.ones_like(self.u0))
     
@@ -694,16 +708,6 @@ class AdvectionReactionDiffusion:
             else:
                 implicit_source_term = 0.0
 
-            #if self.implicit_source["name"] == "CahnHiliard":
-            #    eq_mu = ImplicitSourceTerm(1, var=mu) == self.implicit_source["A"] * (rho**2 - 1) * rho - DiffusionTerm(coeff=self.implicit_source["B"], var=rho)
-
-            #    eq_rho = TransientTerm(var=rho) == DiffusionTerm(coeff=self.D, var=mu)
-
-            #    rho.updateOld()
-
-            #    eq_mu.solve(var=mu)
-            #    eq_rho.solve(var=rho, dt=dt)
-            #else:
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
             eq.solve(var=rho, dt=dt)
         

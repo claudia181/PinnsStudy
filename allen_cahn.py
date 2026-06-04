@@ -46,7 +46,7 @@ class AllenCahn:
     force : np.ndarray
         Force values.
     """
-    def __init__(self, lam: float = None, force_params: list = None, device: str = "cpu"):
+    def __init__(self, lam: float = None, force_params: list = None):
         """
         Constructor.
 
@@ -56,15 +56,13 @@ class AllenCahn:
             PDE parameter that indicates the thickness of the considered surface.
         force_params : list
             PDE parameters describing the forces in the system.
-        device : str
         """
-        self.device = device
 
         if lam is None: lam = THICKNESS_PARAM
         if force_params is None: force_params = FORCE_PARAMS
 
-        self.lam = torch.tensor(lam, device=device)  
-        self.force_params = torch.tensor(force_params, device=device)
+        self.lam = torch.tensor(lam)  
+        self.force_params = torch.tensor(force_params)
 
         self.x, self.y = None, None
         self.u, self.du, self.d2u = None, None, None
