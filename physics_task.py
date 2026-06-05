@@ -259,8 +259,15 @@ class TemporalDerivative2Task(PhysicsTask):
 
 class AdvectionReactionDiffusionTask(PhysicsTask):
 
-    def __init__(self, parameters: dict, weight: float = None, device: str = "cpu"):
+    def __init__(self, parameters: dict, velocity: Callable, source: Callable, D: float = None, implicit_source: str = None, A: float = None, B: float = None, weight: float = None, device: str = "cpu"):
+        self.velocity = velocity
+        self.source = source
+        self.implicit_source = implicit_source
+        self.A = A
+        self.B = B
+
         def lhs(
+                x: torch.Tensor,
                 u: torch.Tensor, 
                 du: torch.Tensor, 
                 d2u: torch.Tensor,

@@ -28,7 +28,9 @@ def make_source(
         mode: str = "constant",
         amp: float = 0.0,
         delta: float = 0.1,
-        period: float = 5.0
+        period: float = 5.0,
+        A: float = 0.0,
+        B: float = 0.0
         ) -> Callable[[np.ndarray, np.ndarray, float, np.ndarray], float]:
     """
     Build a Gaussian source (real-valued) function.
@@ -93,24 +95,24 @@ def make_source(
     elif mode == "temporary":
         def source(x, y, t, u = None):
             return amp * G(x, y) * (t < period)
+
+    elif mode == "logistic":
+        def source(x = None, y = None, t = None, u = None):
+            if u is None:
+                raise TypeError(f"Logistic source missing 1 required argument: 'u'.")
+            return A * u**2 - B * u
     
-    #elif mode == "logistic":
-    #    def source(x = None, y = None, t = None, u = None):
-    #        if u is None:
-    #            raise TypeError(f"Logistic source missing 1 required argument: 'u'.")
-    #        return A*u * (1 - B*u)
-    #
-    #elif mode == "AllenCahn":
-    #    def source(x = None, y = None, t = None, u = None):
-    #        if u is None:
-    #            raise TypeError(f"AllenCahn source missing 1 required argument: 'u'.")
-    #        return u * (1 - u**2)
-    #        
-    #elif mode == "Arrhenius":
-    #    def source(x = None, y = None, t = None, u = None):
-    #        if u is None:
-    #            raise TypeError(f"Arrhenius source missing 1 required argument: 'u'.")
-    #        return A * np.exp(-B/u)
+    elif mode == "AllenCahn":
+        def source(x = None, y = None, t = None, u = None):
+            if u is None:
+                raise TypeError(f"AllenCahn source missing 1 required argument: 'u'.")
+            return A * (u**3 - u)
+            
+    elif mode == "Arrhenius":
+        def source(x = None, y = None, t = None, u = None):
+            if u is None:
+                raise TypeError(f"Arrhenius source missing 1 required argument: 'u'.")
+            return A * np.exp(- B / u)
         
     else:
         raise ValueError(f"Argument 'mode' must be 'constant'|'decay'|'oscillate'|'temporary', not {mode}.")
@@ -261,9 +263,9 @@ class AdvectionReactionDiffusion:
             self,
             velocity: Callable = None,
             source: Callable = None,
-            implicit_source: str = None,
-            A: float = None,
-            B: float = None,
+            implicit_source: Callable = None,#implicit_source: str = None,
+            #A: float = None,
+            #B: float = None,
             diffusion_coeff: float = None
             ):
         """
@@ -307,19 +309,24 @@ class AdvectionReactionDiffusion:
             self.s = source
             #self.implicit_source = implicit_source
         
-        if A is None:
-            A = 1.0
-        if B is None:
-            B = 1.0
+        #if A is None:
+        #    A = 1.0
+        #if B is None:
+        #    B = 1.0
 
+        #if implicit_source is None:
+        #    implicit_source = ""
+        #    
+        #self.implicit_source = {
+        #    "name": implicit_source,
+        #    "A": A,
+        #    "B": B
+        #}
         if implicit_source is None:
-            implicit_source = ""
-            
-        self.implicit_source = {
-            "name": implicit_source,
-            "A": A,
-            "B": B
-        }
+            self.i_s = make_source(mode="constant", amp=0.0)
+            #self.implicit_source = False
+        else:
+            self.i_s = implicit_source
         
         if diffusion_coeff is None:
             self.D = 0.0
@@ -634,7 +641,8 @@ class AdvectionReactionDiffusion:
         u = [None, self.u0.copy(), self.u0.copy()]
 
         velocity = FaceVariable(mesh=self.mesh, rank=1)
-        source = CellVariable(mesh=self.mesh, rank=0)
+        source_term = CellVariable(mesh=self.mesh, rank=0)
+        implicit_source_term = CellVariable(mesh=self.mesh, rank=0)
         
         self.u = []
         self.du = []
@@ -646,13 +654,16 @@ class AdvectionReactionDiffusion:
         for i, t in enumerate(times):
             v = self.v(self.x_faces, self.y_faces, t)
             s = self.s(self.x, self.y, t, rho.value.copy())
+            i_s = self.i_s(self.x, self.y, t, rho.value.copy())
+
             velocity.setValue(v)
-            source.setValue(s)
+            source_term.setValue(s)
+            implicit_source_term.setValue(i_s)
+
             #if self.implicit_source:
             #    source_term = ImplicitSourceTerm(coeff=source)
             #else:
             #    source_term = source
-            source_term = source
             
             u[-1] = rho.value.copy()
             if self.shape == "rectangle":
@@ -699,54 +710,20 @@ class AdvectionReactionDiffusion:
                     self.velocity.append(self.v(self.x, self.y, t))
                     self.source.append(s)
             
-            if self.implicit_source["name"] == "AllenCahn":
-                implicit_source_term = self.implicit_source["A"] * (rho**2 - 1) * rho
-            elif self.implicit_source["name"] == "logistic":
-                implicit_source_term = self.implicit_source["A"] * rho**2 - self.implicit_source["B"] * rho
-            elif self.implicit_source["name"] == "Arrhenius":
-                implicit_source_term = self.implicit_source["A"] * np.exp(- self.implicit_source["B"] / rho)
-            else:
-                implicit_source_term = 0.0
+            #if self.implicit_source["name"] == "AllenCahn":
+            #    implicit_source_term = self.implicit_source["A"] * (rho**2 - 1) * rho
+            #elif self.implicit_source["name"] == "logistic":
+            #    implicit_source_term = self.implicit_source["A"] * rho**2 - self.implicit_source["B"] * rho
+            #elif self.implicit_source["name"] == "Arrhenius":
+            #    implicit_source_term = self.implicit_source["A"] * np.exp(- self.implicit_source["B"] / rho)
+            #else:
+            #    implicit_source_term = 0.0
 
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
-            eq.solve(var=rho, dt=dt)
+            eq.sweep(var=rho, dt=dt) # eq.solve(var=rho, dt=dt)
         
             u[-3] = u[-2]
             u[-2] = u[-1]
-    
-    def compute_velocity(self, x: np.ndarray, y: np.ndarray, t: float) -> np.ndarray:
-        """
-        Compute the velocity value.
-
-        Parameters
-        ----------
-        x : np.ndarray
-        y : np.ndarray
-        t : float
-
-        Returns
-        -------
-        np.ndarray
-            The velocity value(s).
-        """
-        return self.v(x, y, t)
-
-    def compute_source(self, x: np.ndarray, y: np.ndarray, t: float) -> np.ndarray:
-        """
-        Compute the source value.
-
-        Parameters
-        ----------
-        x : np.ndarray
-        y : np.ndarray
-        t : float
-
-        Returns
-        -------
-        np.ndarray
-            The source value(s).
-        """
-        return self.s(x=x, y=y, t=t)
 
     @classmethod
     def residual(
@@ -754,8 +731,10 @@ class AdvectionReactionDiffusion:
         u: torch.Tensor,
         du: torch.Tensor,
         d2u: torch.Tensor,
+
         #lap: torch.Tensor,
         #lap2: torch.Tensor,
+        
         vx: torch.Tensor, 
         vy: torch.Tensor,
         D: float,
