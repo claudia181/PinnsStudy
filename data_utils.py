@@ -97,7 +97,7 @@ def filter_tensors(
             rmin = subset["r"][0]
             rmax = subset["r"][1]
             center = torch.tensor(center_coords)
-            x = columns[0]
+            x = columns[0][:, :2]
             if mode == "closed":
                 mask = mask & (torch.linalg.norm(x - center, axis=1) >= rmin) & (torch.linalg.norm(x - center, axis=1) <= rmax)
             elif mode == "open":
@@ -116,7 +116,7 @@ def filter_tensors(
 def extract_TensorDataset(
         dataset: ConcatDataset|TensorDataset, 
         time_indexes: list = None, 
-        spatial_ranges: dict = {},
+        spatial_ranges: dict|List[dict] = {},
         shape: str = "rectangle"
     ) -> TensorDataset:
     """
@@ -233,10 +233,10 @@ def extract_boundary(
             else:
                 bd_cols = [torch.cat((c1, c2)) for c1, c2 in zip(bd_cols, new_cols)]
     elif shape == "circle": # shape = "circle"
-        boundary = {"x": center[0], "y": center[1], "r": [radius-cell_size, radius]}
+        boundary = {"x": center[0], "y": center[1], "r": [radius-0.5*cell_size, radius+0.5*cell_size]}#[radius-cell_size, radius]}
         new_cols = filter_tensors(columns=cols, spatial_ranges=boundary, mode="closed", shape=shape)
         center = torch.tensor([center[0], center[1]]).repeat(len(new_cols[0]), 1)
-        out_vect = new_cols[0] - center
+        out_vect = new_cols[0][:, :2] - center
         outward_normal_vectors = out_vect / torch.linalg.norm(out_vect, dim=1, keepdim=True)
         new_cols.append(outward_normal_vectors)
         bd_cols += new_cols
@@ -286,7 +286,7 @@ def extract_interior(
     if shape == "rectangle":
         ranges = {"x": [xmin, xmax], "y": [ymin, ymax]}
     elif shape == "circle":
-        ranges = {"x": center[0], "y": center[1], "r": [-1.0, radius-cell_size]}
+        ranges = {"x": center[0], "y": center[1], "r": [-1.0, radius-0.5*cell_size]}
     else:
         raise ValueError(f"Unrecognized {shape} boundary shape.")
     cols = filter_tensors(columns=cols, spatial_ranges=ranges, mode="open", shape=shape)
@@ -365,6 +365,9 @@ def get_circle(radius: float, dx_list: List[float]) -> torch.Tensor:
     # points = [(x1, y1, ...), ..., (x[N^2], y[N^2], ...)], shape (N^2, 2)
     points = torch.column_stack(cols)
     return points
+
+def get_normal(n_samples: int, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    return torch.normal(mean=mean.repeat(n_samples, 1), std=std.repeat(n_samples, 1))
 
 def add_column(dataset: TensorDataset|ConcatDataset, column: torch.Tensor|List[torch.Tensor]) -> TensorDataset|ConcatDataset:
     if type(dataset) is TensorDataset and type(column) is torch.Tensor:

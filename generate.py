@@ -28,25 +28,54 @@ DU              = 2
 D2U             = 3
 OUTWARD_NORMAL  = 4
 
-def generate_AllenCahn(lam: float, xi: list, X: torch.Tensor) -> TensorDataset:
+def generate_AllenCahn(X: torch.Tensor, lam: float, xi: list, include_lam: bool = False, include_xi: bool = False) -> TensorDataset:
     pde = AllenCahn(lam=lam, force_params=xi)
     pde.set_spatial_points(x=X[:, 0], y=X[:, 1])
     #points = torch.stack([pde.x, pde.y], dim=1)
     pde.solve()
-    #param_values = [lam] + xi
-    #torch.tensor(param_values).repeat(len(X), 1)
 
-    dataset = TensorDataset(
-            X, # X = 0
-            pde.u, # U = 1
-            pde.du, # DU = 2
-            pde.d2u # D2U = 3
-            #param_values # PDE_VALUES = 4
-            )
+    params = []
+    if include_lam:
+        params.append(lam)
+    if include_xi:
+        for item in xi:
+            params.append(item)
+    if params != []:
+        params = torch.tensor(params).repeat(len(X), 1)
+        dataset = TensorDataset(
+                X, # X = 0
+                pde.u, # U = 1
+                pde.du, # DU = 2
+                pde.d2u, # D2U = 3
+                params # PARAMS = 4
+                )
+    else:
+        dataset = TensorDataset(
+                X, # X = 0
+                pde.u, # U = 1
+                pde.du, # DU = 2
+                pde.d2u # D2U = 3
+                )
     return dataset
 
-def generate_AllenCahn_unlabeled(X: torch.Tensor) -> TensorDataset:
-    dataset = TensorDataset(X)
+def generate_AllenCahn_unlabeled(X: torch.Tensor, lam: float = None, xi: list = None, include_lam: bool = False, include_xi: bool = False) -> TensorDataset:
+    params = []
+    if include_lam:
+        if lam is None:
+            raise ValueError("Missing lambda parameter (lam = None).")
+        else:
+            params.append(lam)
+    if include_xi:
+        if xi is None:
+            raise ValueError("Missing xi parameter (xi = None).")
+        else:
+            for item in xi:
+                params.append(item)
+    if params == []:
+       dataset = TensorDataset(X)
+    else:
+        params = torch.tensor(params).repeat(len(X), 1)
+        dataset = TensorDataset(X, params)
     return dataset
 
 def help_rectangle() -> None:
@@ -99,9 +128,6 @@ def generate_AdvectionReactionDiffusion(
         diffusion_coeff: float,
         source: Callable,
         implicit_source: Callable,
-        #implicit_source: str, 
-        #A: float, 
-        #B: float,
 
         shape: str,
         spatial_region: dict,
@@ -111,6 +137,16 @@ def generate_AdvectionReactionDiffusion(
         t0: float,
         tN: float,
         dt: float,
+
+        include_diffusion_coeff: bool = False,
+        include_velocity_values: bool = False,
+        include_source_values: bool = False,
+        include_implicit_source_A: bool = False,
+        include_implicit_source_B: bool = False,
+        A: float = None, # if the source is implicit and you want to save its params values
+        B: float = None, # if the source is implicit and you want to save its params values
+
+        include_bc: bool = False,
 
         snapshots: Set[float] = None,
         n_snapshots: int = None,
@@ -150,23 +186,100 @@ def generate_AdvectionReactionDiffusion(
     for i, time in enumerate(pde.t):
         t = torch.flatten(torch.tensor(time).repeat(len(x), 1))
         X = torch.stack([x, y, t], dim=1)
-        #vx = torch.from_numpy(pde.velocity[i][0])
-        #vy = torch.from_numpy(pde.velocity[i][1])
-        #s = torch.from_numpy(pde.source[i])
-        #a = torch.tensor(A).repeat(len(x), 1)
-        #b = torch.tensor(B).repeat(len(x), 1)
-        #diff_coeff = torch.tensor(diffusion_coeff).repeat(len(x), 1)
-        #param_values = torch.stack([diff_coeff, vx, vy, s, a, b], dim=1)
-        dataset = TensorDataset(
-            X,
-            u[i],
-            du[i],
-            d2u[i]
+        params = []
+        if include_diffusion_coeff:
+            diff_coeff = torch.flatten(torch.tensor(diffusion_coeff).repeat(len(x), 1))
+            params.append(diff_coeff)
+        if include_velocity_values:
+            vx = torch.from_numpy(pde.velocity[i][0])
+            params.append(vx)
+            vy = torch.from_numpy(pde.velocity[i][1])
+            params.append(vy)
+        if include_source_values:
+            s = torch.from_numpy(pde.source[i])
+            params.append(s)
+        if include_implicit_source_A:
+            if A is None:
+                raise ValueError(f"Missing implicit source param 'A'.")
+            a = torch.flatten(torch.tensor(A).repeat(len(x), 1))
+            params.append(a)
+        if include_implicit_source_B:
+            if B is None:
+                raise ValueError(f"Missing implicit source param 'B'.")
+            b = torch.flatten(torch.tensor(B).repeat(len(x), 1))
+            params.append(b)
+
+        if params == []:
+            params = None
+        else:
+            params = torch.stack(params, dim=1)
+
+        bcs = None
+        if include_bc:
+            if shape == "rectangle":
+                bcs = torch.tensor([bc[key][1] for key in ["left", "top", "right", "bottom"]]).repeat(len(x), 1)
+            elif shape == "circle":
+                bcs = torch.tensor(bc["value"]).repeat(len(x), 1)
+            else:
+                raise ValueError(f"Unknown domain shape '{shape}'.")
+
+        if params is not None and bcs is not None:
+            dataset = TensorDataset(
+                X,
+                u[i],
+                du[i],
+                d2u[i],
+                params,
+                bcs
+            )
+        elif params is not None:
+            dataset = TensorDataset(
+                X,
+                u[i],
+                du[i],
+                d2u[i],
+                params
+            )
+        elif bcs is not None:
+            dataset = TensorDataset(
+                X,
+                u[i],
+                du[i],
+                d2u[i],
+                bcs
+            )
+        else:
+            dataset = TensorDataset(
+                X,
+                u[i],
+                du[i],
+                d2u[i]
             )
         datasets.append(dataset)
+
     return ConcatDataset(datasets)
 
-def generate_AdvectionReactionDiffusion_unlabeled(X: torch.Tensor, snapshots: Set[float]) -> ConcatDataset:
+def generate_AdvectionReactionDiffusion_unlabeled(
+        X: torch.Tensor, 
+        snapshots: Set[float],  
+        
+        velocity: Callable = None,
+        diffusion_coeff: float = None,
+        source: Callable = None,
+
+        shape: str = None,
+        bc: dict = None,
+
+        include_diffusion_coeff: bool = False,
+        include_velocity_values: bool = False,
+        include_source_values: bool = False,
+        include_implicit_source_A: bool = False,
+        include_implicit_source_B: bool = False,
+        A: float = None, # if the source is implicit and you want to save its params values
+        B: float = None, # if the source is implicit and you want to save its params values
+
+        include_bc: bool = False
+) -> ConcatDataset:
     x = X[:, 0]
     y = X[:, 1]
     
@@ -174,6 +287,57 @@ def generate_AdvectionReactionDiffusion_unlabeled(X: torch.Tensor, snapshots: Se
     for time in snapshots:
         t = torch.flatten(torch.tensor(time).repeat(len(x), 1))
         X = torch.stack([x, y, t], dim=1)
-        dataset = TensorDataset(X)
+
+        params = []
+        if include_diffusion_coeff:
+            diff_coeff = torch.flatten(torch.tensor(diffusion_coeff).repeat(len(x), 1))
+            params.append(diff_coeff)
+        if include_velocity_values:
+            if velocity is None:
+                raise ValueError(f"Missing velocity vector field.")
+            vx, vy = velocity(x, y, t)
+            vx = torch.from_numpy(vx)
+            vy = torch.from_numpy(vy)
+            params.append(vx)
+            params.append(vy)
+        if include_source_values:
+            if source is None:
+                raise ValueError(f"Missing source scalar field.")
+            s = source(x, y, t)
+            params.append(s)
+        if include_implicit_source_A:
+            if A is None:
+                raise ValueError(f"Missing implicit source param 'A'.")
+            a = torch.flatten(torch.tensor(A).repeat(len(x), 1))
+            params.append(a)
+        if include_implicit_source_B:
+            if B is  None:
+                raise ValueError(f"Missing implicit source param 'B'.")
+            b = torch.flatten(torch.tensor(B).repeat(len(x), 1))
+            params.append(b)
+
+        if params == []:
+            params = None
+        else:
+            params = torch.stack(params, dim=1)
+    
+        bcs = None
+        if include_bc:
+            if shape == "rectangle":
+                bcs = torch.tensor([bc[key][1] for key in ["left", "top", "right", "bottom"]]).repeat(len(x), 1)
+            elif shape == "circle":
+                bcs = torch.tensor(bc["value"]).repeat(len(x), 1)
+            else:
+                raise ValueError(f"Unknown domain shape '{shape}'.")
+
+        if params is not None and bcs is not None:
+            dataset = TensorDataset(X, params, bcs)
+        elif params is not None:
+            dataset = TensorDataset(X, params)
+        elif bcs is not None:
+            dataset = TensorDataset(X, bcs)
+        else:
+            dataset = TensorDataset(X)
         datasets.append(dataset)
+
     return ConcatDataset(datasets)
