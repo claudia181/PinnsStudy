@@ -28,37 +28,9 @@ import os
 from torch.utils.data import TensorDataset
 from physics_task import PhysicsTask
 from typing import Tuple, List
-from generate import X, U, DU, D2U, PDE_VALUES, IC_VALUES, GE_KEYS, GE_VALUES
 
 EWC_MODES       = ["On", "Off"]
 DWA_MODES       = ["Off", "Std", "Norm1", "NormK"]
-
-# Internal function -------------------------
-def _get_dictionary(keys: torch.Tensor, values: torch.Tensor, pde_name: str) -> dict:
-    """
-    Parameters
-    ----------
-    keys : torch.Tensor
-        A tensor of integer keys identifying the string keys of a PDE object (keys[0].tolist() gives the list of such integer keys).
-    values : torch.Tensor
-        Each element of this tensor corresponds to a key.
-    pde_name: str
-        String identifier of the PDE.
-    
-    Returns
-    -------
-    dict
-        The dictionary {<key_str, value(s)>} for the PDE identified by pde_name.
-    """
-    dictionary = {}
-    keys = keys[0].tolist()
-    key_strings = [key_str(k, pde_name) for k in keys]
-    values = [values[:, i] for i in range(values.shape[1])]
-    for key, value in zip(key_strings, values):
-        if len(value) == 1:
-            value = value.item()
-        dictionary[key] = value
-    return dictionary
 
 # PINN class definition ----------------------
 class Pinn(torch.nn.Module):
@@ -67,17 +39,15 @@ class Pinn(torch.nn.Module):
     """
     def __init__(
             self,
-            pde: str,
             device: str,
             hidden_units: list,
             activation: nn.Module = nn.Tanh(),
             input_units: int = None,
-            time_in_input: bool = False,
-            space_in_input: bool = True,
+            temporal_input: int = 1,
+            spatial_input: int = 2,
             fourier_features: int = -1,
             frequency_variance: float = 1.0,
-            pde_params_in_input: list = [],
-            ic_params_in_input: list = [],
+            param_input: int = 0,
             task_list: List[PhysicsTask] = [],
             eval_task_list: List[PhysicsTask] = [],
             ewc_mode: str = "Off",
@@ -101,8 +71,6 @@ class Pinn(torch.nn.Module):
 
         Parameters
         ----------
-        pde : str
-            String identifying the PDE for which the model is constructed.
         device : str
             Device.
         hidden_units : list
@@ -111,22 +79,22 @@ class Pinn(torch.nn.Module):
             Activation function of the network.
         input_units : int
             Total number of input units (space, time, additional parameters).
-        time_in_input : bool
+        temporal_input : bool
             True if the time is provided as input.
-        space_in_input : bool
-            True if the space is provided as input.
+        spatial_input : int
+            Number of spatial dimensions in input.
         fourier_features : int
             Number of Fourier features for the encoding of spatio-temporal coordinates;
             -1 means that this encoding is not applied.
         frequency_variance : float
             Variance of the 0-centered Gaussian distribution 
             from which the frequency matrix (B) for Fourier features are sampled.
-        pde_params_in_input : list
-            List of the keys identifying the PDE parameters provided in input to the model.
-        ic_params_in_input : list
-            List of the keys identifying the initial conditions parameters provided in input to the model.
+        param_input : list
+            Number of parametrization dimensions in input.
         task_list : List[PhysicsTask]
             List of PhysicsTask objects (the training objectives).
+        eval_task_list : List[PhysicsTask]
+            List of PhysicsTask objects (the ones on which evaluation metrics are collected).
         ewc_mode : str
             Elastic weight consolidation mode ("On" or "Off").
         dwa_mode : str
@@ -138,7 +106,9 @@ class Pinn(torch.nn.Module):
         dwa_warm_up : int
             Warm up steps for dynamic weight adaptation.
         monitor_conflicts : bool
-            If True and DWA is active, the last cosine similarities btw the GE gradient and the other gradients are maintained in model.ge_conflicts.
+            If True and DWA is active, updates each task.conflict attribute with the cosine similarity btw the task gradient and the conflict_reference_task gradient.
+        conflict_reference_task : int
+            The objective wrt which the conflicts are computed.
         ewc_weight : float
             Starting weight of the elastic weight consolidation term.
         ewc_auto_weighting : bool
@@ -157,19 +127,17 @@ class Pinn(torch.nn.Module):
         
         # Set the parameters
         self.device = device
-        self.pde = pde
-        self.time_in_input = time_in_input
-        self.space_in_input = space_in_input
+        self.temporal_input = temporal_input
+        self.spatial_input = spatial_input
         self.fourier_features = fourier_features
         self.frequency_variance = frequency_variance
         if fourier_features != -1:
             torch.manual_seed(42)
-            self.B = torch.randn(2 * space_in_input + time_in_input, fourier_features) * frequency_variance
+            self.B = torch.randn(2 * spatial_input + temporal_input, fourier_features) * frequency_variance
             self.B = self.B.to(device)
         else:
             self.B = None
-        self.pde_params_in_input = pde_params_in_input
-        self.ic_params_in_input = ic_params_in_input
+        self.param_input = param_input
         
         self.input_units = input_units
         self.hidden_units = hidden_units
@@ -193,12 +161,6 @@ class Pinn(torch.nn.Module):
         self.dwa_mode = dwa_mode
         self.monitor_conflicts = monitor_conflicts
         self.conflict_reference_task = conflict_reference_task
-        self.ge_conflicts = {
-            "bc": 1.0, "ic": 1.0, 
-            "out": 1.0, "der": 1.0, "derx": 1.0, "dert": 1.0, "hes": 1.0, "hesx": 1.0, "hest": 1.0, 
-            "distill_out": 1.0, "distill_der": 1.0, "distill_derx": 1.0, "distill_dert": 1.0, "distill_hes": 1.0, "distill_hesx": 1.0, "distill_hest": 1.0, 
-            "nl": 1.0, "nl_bc": 1.0, "nl_ic": 1.0, "ewc": 1.0
-            }
         self.alpha = alpha
         self.moving_avg_frequency = moving_avg_frequency
         self.dwa_warm_up = dwa_warm_up
@@ -225,7 +187,7 @@ class Pinn(torch.nn.Module):
         if self.fourier_features == -1:
             net_dict['lin0'] = nn.Linear(self.input_units, self.hidden_units[0])
         else:
-            n = 2 * self.fourier_features + len(self.pde_params_in_input) + len(self.ic_params_in_input)
+            n = self.spatial_input * self.fourier_features + len(self.param_input)
             net_dict['lin0'] = nn.Linear(n, self.hidden_units[0])
         net_dict['act0'] = self.activation
 
@@ -541,14 +503,14 @@ class Pinn(torch.nn.Module):
     def loss_fn(
             self,
             x_list: List[torch.Tensor],
-            variable_param_list: List[torch.Tensor] = None, # pde, ic
-            labels: dict = None
+            input_param_list: List[torch.Tensor] = None, # pde, ic
+            labels: dict = None,
     ) -> torch.Tensor:
         if labels is None:
             labels = {}
         for i, task in enumerate(self.task_list):
             x = x_list[i]
-            variable_params = variable_param_list[i]
+            input_params = input_param_list[i]
 
             l_dict = {}
             for key in labels.keys():
@@ -557,7 +519,7 @@ class Pinn(torch.nn.Module):
                 else:
                     raise ValueError("Missing input parameters")
             
-            task.loss_value = task.loss(x=x, variable_params=variable_params, model=self, **l_dict)
+            task.loss_value = task.loss(x=x, input_params=input_params, model=self, **l_dict)
 
         if self.dwa_mode != "Off" and self.moving_avg_count % self.moving_avg_frequency == 0 and self.moving_avg_count >= self.dwa_warm_up:
             self._update_task_weights()
@@ -591,14 +553,14 @@ class Pinn(torch.nn.Module):
     def eval_losses(
             self,
             x_list: List[torch.Tensor],
-            variable_param_list: List[torch.Tensor] = None, # pde, ic
+            input_param_list: List[torch.Tensor] = None, # pde, ic
             labels: dict = None
     ) -> torch.Tensor:
         if labels is None:
             labels = {}
         for i, task in enumerate(self.eval_task_list):
             x = x_list[i]
-            variable_params = variable_param_list[i]
+            input_params = input_param_list[i]
 
             l_dict = {}
             for key in labels.keys():
@@ -607,7 +569,7 @@ class Pinn(torch.nn.Module):
                 else:
                     raise ValueError("Missing input parameters")
             
-            task.loss_value = task.loss(x=x, variable_params=variable_params, model=self, **l_dict)
+            task.loss_value = task.loss(x=x, input_params=input_params, model=self, **l_dict)
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.eval_task_list])
 
@@ -621,50 +583,39 @@ class Pinn(torch.nn.Module):
         return weighted_loss
 
 
-    def label(self, dataset: str|TensorDataset) -> TensorDataset:
+    def label(self, dataset: TensorDataset, spacetime_idx: int, param_idx: int, u_idx: int, du_idx: int, d2u_idx: int, param_subidxs: List[int] = None) -> TensorDataset:
         """
         Label the dataset with model predictions.
 
         Parameters
         ----------
-        dataset : str|TensorDataset
-            Path to the dataset or the dataset object.
+        dataset : TensorDataset
+            Dataset object.
 
         Returns
         -------
         TensorDataset
             The labeled dataset.
         """
-        if type(dataset) is str:
-            if not os.path.exists(dataset):
-                raise ValueError(f"'File {dataset}' not found.")
-            dataset = torch.load(os.path.join(dataset), weights_only=False)
         tensors = [t.clone() for t in dataset.tensors]
-        x = tensors[X].float()
+        x = tensors[spacetime_idx].float()
         self.eval()
         with torch.no_grad():
-            params_values_in_input = None
-            if self.pde_params_in_input is not None and self.pde_params_in_input != []:
-                param_values = tensors[PDE_VALUES]
-                pde_params_in_input_indexes = [key_idx(key, self.pde) for key in self.pde_params_in_input]
-                params_values_in_input = param_values[:, pde_params_in_input_indexes]
-            
-            if self.ic_params_in_input is not None and self.ic_params_in_input != []:
-                ic_values = tensors[IC_VALUES]
-                ic_params_in_input_indexes = [ic_key_idx(key, self.pde) for key in self.ic_params_in_input]    
-                ic_values_in_input = ic_values[:, ic_params_in_input_indexes]
-                if params_values_in_input is not None:
-                    params_values_in_input = torch.cat([params_values_in_input, ic_values_in_input], dim=-1)
+            params = None
+            if self.param_input != 0:
+                if param_subidxs is None:
+                    params = tensors[param_idx]
                 else:
-                    params_values_in_input = ic_values_in_input
+                    params = tensors[param_idx][:, param_subidxs]
+                # params_values_in_input = torch.cat([params_values_in_input, ic_values_in_input], dim=-1)
 
-            tensors[U] = self.forward(x, params_values_in_input)
-            tensors[DU] = self.derivative(order=1, x=x, pde_params=params_values_in_input)
-            tensors[D2U] = self.derivative(order=2, x=x, pde_params=params_values_in_input)
+            tensors[u_idx] = self.forward(x, params)
+            tensors[du_idx] = self.derivative(order=1, x=x, pde_params=params)
+            tensors[d2u_idx] = self.derivative(order=2, x=x, pde_params=params)
             
         return TensorDataset(*tensors)
 
-    def get_fisher_diag(self, dataset: TensorDataset) -> torch.Tensor:
+    def get_fisher_diag(self, dataset: TensorDataset, spacetime_idx: int, param_idx: int, u_idx: int, du_idx: int, d2u_idx: int, param_subidxs: List[int] = None) -> torch.Tensor:
         """
         Return the vector containing the diagonal of \n
         the Fisher information matrix \n
@@ -687,36 +638,22 @@ class Pinn(torch.nn.Module):
 
         self.eval()
         for z in dataloader:
-            x = z[X].to(self.device).float()
-            u = z[U].to(self.device).float()
-            #du = z[DU].to(self.device).float()
-            #d2u = z[D2U].to(self.device).float()
-            pde_param_values = None
-            if self.pde_params_in_input is not None and self.pde_params_in_input != []:
-                pde_param_values = z[PDE_VALUES].to(self.device).float()
-                pde_params_in_input_indexes = [key_idx(key, self.pde) for key in self.pde_params_in_input]
-                pde_param_values = pde_param_values[:, pde_params_in_input_indexes]
-            
-            ic_param_values = None
-            if self.ic_params_in_input is not None and self.ic_params_in_input != []:
-                ic_param_values = z[IC_VALUES].to(self.device).float()
-                ic_params_in_input_indexes = [ic_key_idx(key, self.pde) for key in self.ic_params_in_input]
-                ic_param_values = ic_param_values[:, ic_params_in_input_indexes]
-                if pde_param_values is not None:
-                    pde_param_values = torch.cat([pde_param_values, ic_param_values], dim=-1)
-                else:
-                    pde_param_values = ic_param_values
+            x = z[spacetime_idx].to(self.device).float()
+            u = z[u_idx].to(self.device).float()
 
-            ge_info_keys = z[GE_KEYS].to(self.device).int()
-            ge_info_values = z[GE_VALUES].to(self.device).float()
-            ge_info_dict = _get_dictionary(ge_info_keys, ge_info_values, self.pde)
+            params = None
+            if self.param_input != 0:
+                if param_subidxs is None:
+                    params = z[param_idx]
+                else:
+                    params = z[param_idx][:, param_subidxs]
 
             self.zero_grad()
             self.dwa_mode = "Off"
             self.ewc_mode = "Off"
             self.distill_mode = "Forgetting"
 
-            u_pred = self.forward(x, pde_param_values)
+            u_pred = self.forward(x, params)
             per_sample_loss = (u_pred - u) ** 2
             loss = per_sample_loss.mean()
             #loss = self.loss_fn(

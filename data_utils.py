@@ -333,6 +333,20 @@ def subsample(
     reduced_dataset = TensorDataset(*reduced_cols)
     return reduced_dataset
 
+def subsample_normal(dataset: TensorDataset, mean: torch.Tensor, stddev: float, n_samples: int) -> TensorDataset:
+    d = len(mean)
+    X = dataset.tensors[0][:, :d]
+
+    # compute the Gaussian bump weights
+    # w = exp(-||x - center||^2 / (2 * stddev^2))
+    weights = torch.exp(-torch.sum((X - mean) ** 2, dim=1) / (2 * (stddev ** 2)))
+
+    # sample indices based on the weights
+    sampled_indices = torch.multinomial(weights, n_samples, replacement=False)
+
+    return TensorDataset(*dataset[sampled_indices])
+
+
 def get_grid(xmin_list: List[float], xmax_list: List[float], dx_list: List[float]) -> torch.Tensor:
     x_list = []
     for xmin, xmax, dx in zip(xmin_list, xmax_list, dx_list):
