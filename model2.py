@@ -502,10 +502,27 @@ class Pinn(torch.nn.Module):
     
     def loss_fn(
             self,
-            x_list: List[torch.Tensor],
-            input_param_list: List[torch.Tensor] = None, # pde, ic
-            labels: dict = None,
+            x_list: List[torch.Tensor], # spatio-temporal input, for each task
+            input_param_list: List[torch.Tensor] = None, # physics parameters in input, for each task
+            labels: dict = None, # true labels, if some task needs (some of) them (dictionary of lists, where each list has one item for each task)
     ) -> torch.Tensor:
+        """
+        Training loss function.
+
+        Parameters
+        ----------
+        x_list: List[torch.Tensor]
+            List of spatio-temporal inputs, one tensor (batch) for each task.
+        input_param_list : List[torch.Tensor]
+            List of physics parameters in input, one tensor (batch) for each task.
+        labels : dict
+            True labels, if some task needs (some of) them; dictionary of lists, where each list has one item (batch) for each task.
+
+        Returns
+        -------
+        torch.Tensor
+            The loss value.
+        """
         if labels is None:
             labels = {}
         for i, task in enumerate(self.task_list):
