@@ -25,7 +25,7 @@ import shutil
 import copy
 
 from optuna_objective import Objective
-from model2 import PdeNet
+from model2 import Pinn
 from data_utils import subsample, replace_labels, extract_TensorDataset, extract_boundary, extract_interior, include_time_in_input, exclude_space_in_input
 from load_store_utils import resume_model
 from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, StationaryAllenCahnTask, OutputTask, DerivativeTask, Derivative2Task, SpatialDerivativeTask, SpatialDerivative2Task, TemporalDerivativeTask, TemporalDerivative2Task, ICTask, NeumannBCTask, DirichletBCTask
@@ -83,27 +83,26 @@ def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> L
 # =============================================== Run configuration ===============================================
 
 def train_ARD(
-        model: PdeNet,
+        model: Pinn,
 
-        ff_encoding: bool,
         ff_size: int,
         ff_frequency_var: float,
 
         n_param_input: int,
 
         new_tasks: List[PhysicsTask],
-        new_monitoring_indices: List[int],
         new_datas: List[TensorDataset],
         new_weights: List[float],
 
         recall_tasks: List[PhysicsTask],
-        recall_monitoring_indices: List[int],
         recall_datas: List[TensorDataset],
         recall_weights: List[float],
 
-        eval_tasks: List[PhysicsTask],
-        eval_datas: TensorDataset,
-        aggregation_function: Callable[..., torch.Tensor|float],
+        val_tasks: List[PhysicsTask],
+        val_datas: TensorDataset,
+
+        monitoring_tasks: List[PhysicsTask],
+        monitoring_datas: TensorDataset,
         
         dwa: bool,
         dwa_mode: str,
@@ -111,10 +110,10 @@ def train_ARD(
         dwa_moving_avg_factor: float,
         dwa_moving_avg_frequency: int,
 
-        distil_model: PdeNet,
+        distil_model: Pinn,
 
         ewc: bool,
-        ewc_model: PdeNet,
+        ewc_model: Pinn,
         ewc_data: TensorDataset,
         ewc_weight: float,
         ewc_auto_weighting: bool,
@@ -132,8 +131,6 @@ def train_ARD(
         seed=42,
         device="cpu"
 ):
-    train_iterators = get_iterators(datas = new_datas + recall_datas, batch_size = batch_size, seed = seed)
-    eval_iterators = get_iterators(datas = eval_datas, batch_size = batch_size, seed = seed)
 
     def objective(trial):
         # Sample hyperparameters
@@ -142,15 +139,13 @@ def train_ARD(
         else:
             trial_batch_size = batch_size
         
+        train_iterators = get_iterators(datas = new_datas + recall_datas, batch_size = trial_batch_size, seed = seed)
+        eval_iterators = get_iterators(datas = val_datas + monitoring_datas, batch_size = trial_batch_size, seed = seed)
+        
         if type(learning_rate) is list:
             trial_learning_rate = trial.suggest_categorical("learning_rate", learning_rate)
         else:
             trial_learning_rate = learning_rate
-        
-        if type(ff_encoding) is list:
-            trial_ff_encoding = trial.suggest_categorical("ff_encoding", ff_encoding)
-        else:
-            trial_ff_encoding = ff_encoding
 
         if type(ff_frequency_var) is list:
             trial_ff_frequency_var = trial.suggest_categorical("ff_frequency_var", ff_frequency_var)
@@ -161,18 +156,24 @@ def train_ARD(
             trial_ff_size = trial.suggest_categorical("ff_size", ff_size)
         else:
             trial_ff_size = ff_size
+        
+        model.set_ff(fourier_features=trial_ff_size, frequency_variance=trial_ff_frequency_var)
 
         if ewc:
             if type(ewc_weight) is list:
-                trial_ewc_weight = trial.suggest_categorical("ewc_weight", ewc_weight)
+                model.ewc_weight = trial.suggest_categorical("ewc_weight", ewc_weight)
             else:
-                trial_ewc_weight = ewc_weight
+                model.ewc_weight = ewc_weight
         
         if dwa:
             if type(dwa_moving_avg_factor) is list:
-                trial_dwa_moving_avg_factor = trial.suggest_categorical("dwa_moving_avg_factor", dwa_moving_avg_factor)
+                model.alpha = trial.suggest_categorical("dwa_moving_avg_factor", dwa_moving_avg_factor)
             else:
-                trial_dwa_moving_avg_factor = dwa_moving_avg_factor
+                model.alpha = dwa_moving_avg_factor
+
+            model.dwa_mode = dwa_mode
+            model.dwa_warm_up = dwa_warm_up
+            model.moving_avg_frequency = dwa_moving_avg_frequency
         
         for i, weight in enumerate(new_weights):
             if type(weight) is list:
@@ -185,344 +186,188 @@ def train_ARD(
                 recall_tasks[i].weight = trial.suggest_categorical(f"recall_weight{i}", weight)
             else:
                 recall_tasks[i].weight = weight
+        
+        for task in new_tasks + recall_tasks + val_tasks + monitoring_tasks:
+            task.grad_norm = None
+            task.grad = None
+            task.conflict = None
+            task.loss_value = None
+        
+        model.task_list = new_tasks + recall_tasks
+        model.eval_task_list = val_tasks + monitoring_tasks
 
-        optimizer = Adam(params=model.parameters(), lr=learning_rate)
+        if ewc:
+            model.ewc_mode = "On"
+        else:
+            model.ewc_mode = "Off"
+        model.ewc_auto_weighting = ewc_auto_weighting
+        model.ewc_warm_up = ewc_warm_up
+        model.ewc_decay = ewc_decay_factor
+        
+
+        
+        ewc_moving_avg_factor: float,
+
+        optimizer = Adam(params=model.parameters(), lr=trial_learning_rate)
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
+        for epoch in range(epochs):
 
-    for epoch in range(epochs):
+            # ----------------------------------- Start of epoch -----------------------------------
 
-        # ----------------------------------- Start of epoch -----------------------------------
-        # Put the model in training mode
-        model.train()
+            # Put the model in training mode
+            model.train()
 
-        if steps < 0:
-            step_prefix = epoch * N
-        else:
-            step_prefix = epoch * min(N, steps)
-        start_time = time.time()
+            if steps < 0:
+                step_prefix = epoch * N
+            else:
+                step_prefix = epoch * min(N, steps)
+            start_time = time.time()
 
-        print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
-
-        for step, batches in enumerate(zip(*train_iterators)):
-            if steps >= 0 and step > steps:
-                break
-
-            x_list = []
-            labels = {
-                "u": [],
-                "du": [],
-                "d2u": []
-            }
-            input_param_list = []
-            bc_list = []
-            
-            for batch in batches:
-                x_list.append(batch[X].to(device).float().requires_grad_(True))
-                labels["u"].append(batch[U].to(device).float())
-                labels["du"].append(batch[DU].to(device).float())
-                labels["d2u"].append(batch[D2U].to(device).float())
-                input_param_list.append(batch[PARAMS].to(device).float())
-                bc_list.append(batch[BC].to(device).float())
-
-            optimizer.zero_grad()
-
-            loss = model.loss_fn(
-                x_list = x_list,
-                input_param_list = input_param_list,
-                labels = labels
-            )
-            
-            # --- Backward pass ---
-            loss.backward()
-            stats_dict["train_loss"].append(loss.item())
-
-            # --- Gradient clipping ---
-            if clip_grad:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            if step % 4 == 0:
-                # --- Compute total gradient norm ---
-                total_grad_norm = 0.0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        total_grad_norm += (p.grad.data.norm(2).item())**2
-                total_grad_norm = total_grad_norm**0.5
-                stats_dict["train_loss_grad_norm"].append(total_grad_norm)
-
-                # --- Early stopping ---
-                if early_stop_value is not None and total_grad_norm < early_stop_value:
-                    print(f"Early stopping at epoch {epoch} (grad norm={total_grad_norm:.3e})")
-                    early_stopping = True
+            for step, batches in enumerate(zip(*train_iterators)):
+                if steps >= 0 and step > steps:
                     break
-            
-            # Call the optimizer
-            optimizer.step()
 
-        if scheduler_mode is not None:
-            scheduler.step()
-        
-        # ----------------------------------- End of epoch -----------------------------------
+                stats_dict["train_steps"].append(step_prefix + step)
+                stats_dict["train_epochs"].append(epoch)
+                print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
 
-        # ------------------------------ Epoch evaluation ------------------------------
+                x_list = []
+                labels = {
+                    "u": [],
+                    "du": [],
+                    "d2u": []
+                }
+                input_param_list = []
+                bc_list = []
 
-        stats_dict["steps"].append(epoch)#step_prefix + step)
+                for batch in batches:
+                    x_list.append(batch[X].to(device).float().requires_grad_(True))
+                    labels["u"].append(batch[U].to(device).float())
+                    labels["du"].append(batch[DU].to(device).float())
+                    labels["d2u"].append(batch[D2U].to(device).float())
+                    input_param_list.append(batch[PARAMS].to(device).float())
+                    bc_list.append(batch[BC].to(device).float())
 
-        # Append the epoch time
-        stop_time = time.time()
-        epoch_time = stop_time-start_time
-        print(f'Epoch time: {epoch_time}')
-        stats_dict["times"].append(epoch_time)
+                optimizer.zero_grad()
 
-        for i in new_monitoring_indices:
-            task = new_tasks[i]
-            stats_dict["weights"][task.id].append(task.weight)
-            stats_dict["conflicts"][task.id].append(task.conflict)
-            stats_dict["grad_norms"][task.id].append(task.grad_norm)
-            stats_dict["grads"][task.id].append(task.grad)
+                loss = model.train_loss(
+                    x_list = x_list,
+                    input_param_list = input_param_list,
+                    labels = labels
+                )
 
-        if (step_prefix + step) % eval_every == 0:
-            model.eval()
-            with torch.no_grad():
-                for key, dataloader, bc_iter, ic_iter in to_eval:
-                    # Compute and average the loss over the val dataloader
-                    sum_dict = {}
-                    for k in LOSS_TERMS + ["weighted_loss"]:
-                        sum_dict[k] = 0.0
+                # --- Backward pass ---
+                loss.backward()
+                stats_dict["train_loss_per_step"].append(loss.item())
 
-                    for data, bc_data, ic_data, nl_data, nl_bc_data, nl_ic_data, distill_data in zip(dataloader, bc_iter, ic_iter, nl_iter, nl_bc_iter, nl_ic_iter, distill_iter):
-                        # Load batches from dataloaders
-                        x = data[X].to(device).float().requires_grad_(True)
-                        u = data[U].to(device).float()
-                        du = data[DU].to(device).float()
-                        d2u = data[D2U].to(device).float()
-                        if pde_params_in_input != []:
-                            pde_param_values = data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                        else:
-                            pde_param_values = None
-                        
-                        if ic_params_in_input != []:
-                            ic_param_values = data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                        else:
-                            ic_param_values = None
+                # --- Gradient clipping ---
+                if clip_grad:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-                        residual_info_keys = data[RESIDUAL_KEYS].to(device).int()
-                        residual_info_values = data[RESIDUAL_VALUES].to(device).float()
-                        residual_info_dict = get_dictionary(residual_info_keys, residual_info_values, model.pde)
+                if step % 4 == 0:
+                    # --- Compute total gradient norm ---
+                    total_grad_norm = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            total_grad_norm += (p.grad.data.norm(2).item())**2
+                    total_grad_norm = total_grad_norm**0.5
+                    stats_dict["train_loss_grad_norm"].append(total_grad_norm)
 
-                        # Unlabeled data -----
-                        if nl_data[X] is not None:
-                            x_nl = nl_data[X].to(device).float().requires_grad_(True)
-                            if pde_params_in_input != []:
-                                pde_param_values_nl = nl_data[PDE_VALUES].to(device).float()[:, pde_params_in_input] # assumed sorted
-                            else:
-                                pde_param_values_nl = None
+                # Call the optimizer
+                optimizer.step()
 
-                            if ic_params_in_input != []:
-                                ic_param_values_nl = nl_data[IC_VALUES].to(device).float()[:, ic_params_in_input] # assumed sorted
-                            else:
-                                ic_param_values_nl = None
+            # ----------------------------------- End of epoch -----------------------------------
 
-                            residual_info_keys = nl_data[RESIDUAL_KEYS].to(device).int()
-                            residual_info_values = nl_data[RESIDUAL_VALUES].to(device).float()
-                            residual_info_dict_nl = get_dictionary(residual_info_keys, residual_info_values, model.pde)
+            lr_scheduler.step()
+            stats_dict["train_loss_per_epoch"].append(torch.mean(stats_dict["train_loss_per_step"][step_prefix : step_prefix + step]))
+            stop_time = time.time()
+            epoch_time = stop_time - start_time
+            print(f'Epoch time: {epoch_time}')
+            stats_dict["times"].append(epoch_time)
+            for task in model.task_list:
+                stats_dict["loss"][task.id].append(task.loss)
+                stats_dict["weights"][task.id].append(task.weight)
+                stats_dict["conflicts"][task.id].append(task.conflict)
+                stats_dict["grad_norms"][task.id].append(task.grad_norm)
+                stats_dict["grads"][task.id].append(task.grad)
 
-                        # Boundary data -------
-                        if bc_data[X] is not None:
-                            x_bc = bc_data[X].to(device).float()
-                            u_bc = bc_data[U].to(device).float()
-                            du_bc = bc_data[DU].to(device).float()
-                            outward_normal_bc = bc_data[OUTWARD_NORMAL].to(device).float()
-                            if pde_params_in_input != []:
-                                pde_param_values_bc = bc_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                            else:
-                                pde_param_values_bc = None
-                            
-                            if ic_params_in_input != []:
-                                ic_param_values_bc = bc_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                            else:
-                                ic_param_values_bc = None
+            # ------------------------------ Epoch evaluation ------------------------------
 
-                        else:
-                            x_bc = None
-                            u_bc = None
-                            du_bc = None
-                            outward_normal_bc = None
-                            pde_param_values_bc = None
-                            ic_param_values_bc = None
+            if (step_prefix + step) % eval_every == 0:
+                stats_dict["eval_epochs"].append(epoch)
+                model.eval()
+                with torch.no_grad():
+                    weighted_loss_per_batch = []
+                    for task in model.eval_task_list:
+                        stats_dict["loss_per_batch"][task.id] = []
+                        stats_dict["conflicts_per_batch"][task.id] = []
+                        stats_dict["grad_norms_per_batch"][task.id] = []
+                        stats_dict["grads_per_batch"][task.id] = []
 
-                        if ic_data[X] is not None:
-                            x_ic = ic_data[X].to(device).float()
-                            u_ic = ic_data[U].to(device).float()
-                            if pde_params_in_input != []:
-                                pde_param_values_ic = ic_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                            else:
-                                pde_param_values_ic = None
-                            
-                            if ic_params_in_input != []:
-                                ic_param_values_ic = ic_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                            else:
-                                ic_param_values_ic = None
+                    for batches in zip(*eval_iterators):
+                        x_list = []
+                        labels = {
+                            "u": [],
+                            "du": [],
+                            "d2u": []
+                        }      
 
-                        else:
-                            x_ic = None
-                            u_ic = None
-                            pde_param_values_ic = None
-                            ic_param_values_ic = None
-                        
-                        # nl boundary data -------
-                        if nl_bc_data[X] is not None:
-                            x_nl_bc = nl_bc_data[X].to(device).float()
-                            u_nl_bc = nl_bc_data[U].to(device).float()
-                            du_nl_bc = nl_bc_data[DU].to(device).float()
-                            outward_normal_nl_bc = nl_bc_data[OUTWARD_NORMAL].to(device).float()
-                            if pde_params_in_input != []:
-                                pde_param_values_nl_bc = nl_bc_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                            else:
-                                pde_param_values_nl_bc = None
-                            
-                            if ic_params_in_input != []:
-                                ic_param_values_nl_bc = nl_bc_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                            else:
-                                ic_param_values_nl_bc = None
+                        input_param_list = []
+                        bc_list = []
 
-                        else:
-                            x_nl_bc = None
-                            u_nl_bc = None
-                            du_nl_bc = None
-                            outward_normal_nl_bc = None
-                            pde_param_values_nl_bc = None
-                            ic_param_values_nl_bc = None
+                        for batch in batches:
+                            x_list.append(batch[X].to(device).float().requires_grad_(True))
+                            labels["u"].append(batch[U].to(device).float())
+                            labels["du"].append(batch[DU].to(device).float())
+                            labels["d2u"].append(batch[D2U].to(device).float())
+                            input_param_list.append(batch[PARAMS].to(device).float())
+                            bc_list.append(batch[BC].to(device).float())
 
-                        if nl_ic_data[X] is not None:
-                            x_nl_ic = nl_ic_data[X].to(device).float()
-                            u_nl_ic = nl_ic_data[U].to(device).float()
-                            if pde_params_in_input != []:
-                                pde_param_values_nl_ic = nl_ic_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                            else:
-                                pde_param_values_nl_ic = None
-                            
-                            if ic_params_in_input != []:
-                                ic_param_values_nl_ic = nl_ic_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                            else:
-                                ic_param_values_nl_ic = None
+                        model.eval_loss(
+                            x_list = x_list,
+                            input_param_list = input_param_list,
+                            labels = labels
+                        )
 
-                        else:
-                            x_nl_ic = None
-                            u_nl_ic = None
-                            pde_param_values_nl_ic = None
-                            ic_param_values_nl_ic = None
+                        weighted_loss = 0.0
+                        for val_task, train_task in zip(val_tasks, model.task_list):
+                            weighted_loss += train_task.weight * val_task.loss_value
 
-                        # ---- Distill data ----
-                        if distill_data[X] is None:
-                            x_distill = None
-                            u_distill = None
-                            du_distill = None
-                            d2u_distill = None
-                            pde_param_values_distill = None
-                            ic_param_values_distill = None
-                        else:
-                            x_distill = distill_data[X].to(device).float().requires_grad_(True)
-                            u_distill = distill_data[U].to(device).float().requires_grad_(True)
-                            du_distill = distill_data[DU].to(device).float().requires_grad_(True)
-                            d2u_distill = distill_data[D2U].to(device).float().requires_grad_(True)
-                            if pde_params_in_input != []:
-                                pde_param_values_distill = distill_data[5].to(device).float()[:, pde_params_in_input]
-                            else:
-                                pde_param_values_distill = None
-                            
-                            if ic_params_in_input != []:
-                                ic_param_values_distill = distill_data[5].to(device).float()[:, ic_params_in_input]
-                            else:
-                                ic_param_values_distill = None
-                            
-                        # Evaluate the evaluation loss on val data
-                        eval_dict = model.eval_losses(
-                            x = x,
-                            pde_params = pde_param_values,
-                            ic_params = ic_param_values,
-                            u = u,
-                            du = du,
-                            d2u = d2u,
-                            residual_data = residual_info_dict,
-                            x_bc = x_bc,
-                            n = outward_normal_bc,
-                            pde_params_bc = pde_param_values_bc,
-                            ic_params_bc = ic_param_values_bc,
-                            u_bc = u_bc,
-                            du_bc = du_bc,
-                            x_ic = x_ic,
-                            pde_params_ic = pde_param_values_ic,
-                            ic_params_ic = ic_param_values_ic,
-                            u_ic = u_ic,
+                        weighted_loss_per_batch.append(weighted_loss)
 
-                            x_nl = x_nl,
-                            pde_params_nl = pde_param_values_nl,
-                            ic_params_nl = ic_param_values_nl,
-                            residual_data_nl = residual_info_dict_nl,
-                            x_nl_bc = x_nl_bc,
-                            n_nl = outward_normal_nl_bc,
-                            pde_params_nl_bc = pde_param_values_nl_bc,
-                            ic_params_nl_bc = ic_param_values_nl_bc,
-                            u_nl_bc = u_nl_bc,
-                            du_nl_bc = du_nl_bc,
-                            x_nl_ic = x_nl_ic,
-                            pde_params_nl_ic = pde_param_values_nl_ic,
-                            ic_params_nl_ic = ic_param_values_nl_ic,
-                            u_nl_ic = u_nl_ic,
-                            
-                            x_distill = x_distill,
-                            pde_params_distill = pde_param_values_distill,
-                            ic_params_distill = ic_param_values_distill,
-                            u_distill = u_distill,
-                            du_distill = du_distill,
-                            d2u_distill = d2u_distill,
-                            delayed_weights = delayed_weights
-                            )
+                        for task in model.eval_task_list:
+                            stats_dict["loss_per_batch"][task.id].append(task.loss_value)
+                            stats_dict["conflicts_per_batch"][task.id].append(task.conflict)
+                            stats_dict["grad_norms_per_batch"][task.id].append(task.grad_norm)
+                            stats_dict["grads_per_batch"][task.id].append(task.grad)
 
-                        # Accumulate val loss values
-                        for k in eval_dict.keys():
-                            sum_dict[k] += eval_dict[k].item()
+                    stats_dict["val_weighted_loss"].append(torch.mean(weighted_loss_per_batch))
+                    for task in model.eval_task_list:
+                        stats_dict["loss"][task.id].append(torch.mean(stats_dict["loss_per_batch"][task.id]))
+                        stats_dict["conflicts"][task.id].append(torch.mean(stats_dict["conflicts_per_batch"][task.id]))
+                        stats_dict["grad_norms"][task.id].append(torch.mean(stats_dict["grad_norms_per_batch"][task.id]))
+                        stats_dict["grads"][task.id].append(torch.mean(stats_dict["grads_per_batch"][task.id]))
 
-                    # Append val loss average values
-                    for k in sum_dict.keys():
-                        stats_dict[key][k].append(sum_dict[k] / len(dataloader))
 
-                    stats_dict[key]["step_list"].append(epoch)#(step_prefix + step)
-
-                    print(f"{key} weighted loss: {stats_dict[key]['weighted_loss'][-1]}")
-                    if math.isnan(stats_dict[key]['weighted_loss'][-1]):
-                        #raise ArithmeticError("You get a nan value (instablility issue).\nSuggestion: Repeat this run using an ubber bounded weighting scheme (e.g. Norm1).\n")
+                    print(f"Validation weighted loss: {stats_dict['val_weighted_loss'][-1]}")
+                    if math.isnan(stats_dict['val_weighted_loss'][-1]):
+                        #raise ArithmeticError("You get a nan value.")
                         #to_report = torch.inf
                         #trial.report(to_report, step=epoch)
                         #raise optuna.exceptions.TrialPruned()
                         return None
-                    print(f"{key} out loss: {stats_dict[key]['out_loss'][-1]}")
-                    if model.ewc_mode == "On":
-                        print(f"{key} ewc loss: {stats_dict[key]['ewc_loss'][-1]}")
+                    print(f"Output loss: {stats_dict['loss']['u'][-1]}")
 
-                # Report intermediate result to Optuna
-                if bc_data[X] is not None and "bc" not in loss_prefixes:
-                    loss_prefixes.append("bc")
-                if ic_data[X] is not None and "ic" not in loss_prefixes:
-                    loss_prefixes.append("ic")
+                    # Report intermediate result to Optuna
+                    to_report = sum([stats_dict["loss"][task.id] for task in val_tasks])
+                    trial.report(to_report, step=epoch)
 
-                if val_dataset is not None:
-                    to_report = sum([stats_dict["val"][f"{prefix}_loss"][-1] for prefix in loss_prefixes])
-                else:
-                    to_report = sum([stats_dict["train"][f"{prefix}_loss"][-1] for prefix in loss_prefixes])
-                trial.report(to_report, step=epoch)
-        
-                # Check if the trial should be pruned
-                if trial.should_prune():
-                    raise optuna.exceptions.TrialPruned()
-                
-        if early_stopping:
-            break
-    return stats_dict
+                    # Check if the trial should be pruned
+                    if trial.should_prune():
+                        raise optuna.exceptions.TrialPruned()
+        return stats_dict
 
-    
-        
     
 def train_step_ARD(
         

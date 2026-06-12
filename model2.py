@@ -205,7 +205,16 @@ class Pinn(torch.nn.Module):
 
         # Save model
         self.net = nn.Sequential(net_dict).to(self.device)
-    
+
+    def set_ff(self, fourier_features: int, frequency_variance: float) -> None:
+        self.fourier_features = fourier_features
+        self.frequency_variance = frequency_variance
+        if fourier_features != -1:
+            torch.manual_seed(42)
+            self.B = torch.randn(2 * self.spatial_input + self.temporal_input, fourier_features) * frequency_variance
+            self.B = self.B.to(self.device)
+        else:
+            self.B = None
 
     # Forward function for batches of data
     def forward(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
@@ -500,7 +509,19 @@ class Pinn(torch.nn.Module):
             for task in self.task_list:
                 task.conflict = self._compute_cos_sim(task.grad, reference_task.grad, task.grad_norm, reference_task.grad_norm)
     
-    def loss_fn(
+    def _update_eval_grad_norms(self) -> None:
+        """
+        Update the gradient norm of each evaluation task and the model state accordingly.
+        """
+        for task in self.eval_task_list:
+            task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
+
+        if self.monitor_conflicts:
+            reference_task = self.task_list[self.conflict_reference_task]
+            for task in self.eval_task_list:
+                task.conflict = self._compute_cos_sim(task.grad, reference_task.grad, task.grad_norm, reference_task.grad_norm)
+    
+    def train_loss(
             self,
             x_list: List[torch.Tensor], # spatio-temporal input, for each task
             input_param_list: List[torch.Tensor] = None, # physics parameters in input, for each task
@@ -567,7 +588,7 @@ class Pinn(torch.nn.Module):
         
 
     # Function that evaluate the various losses (1st order distillation, phase 2)
-    def eval_losses(
+    def eval_loss(
             self,
             x_list: List[torch.Tensor],
             input_param_list: List[torch.Tensor] = None, # pde, ic
@@ -587,16 +608,9 @@ class Pinn(torch.nn.Module):
                     raise ValueError("Missing input parameters")
             
             task.loss_value = task.loss(x=x, input_params=input_params, model=self, **l_dict)
+            self._update_eval_grad_norms()
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.eval_task_list])
-
-        if self.ewc_mode == "On":
-            # Compute the loss term
-            ewc_loss = torch.sum(self.ewc_fisher_diag * ((self.get_weights() - self.ewc_model_weights) ** 2))
-            #print(f"ewc_fisher_diag: {torch.mean(self.ewc_fisher_diag)}\nweights: {torch.mean((self.get_weights() - self.ewc_model_weights) ** 2)}")
-
-            weighted_loss += (self.ewc_weight * ewc_loss)
-
         return weighted_loss
 
 
