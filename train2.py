@@ -29,7 +29,7 @@ from model2 import Pinn
 from data_utils import subsample, replace_labels, extract_TensorDataset, extract_boundary, extract_interior, include_time_in_input, exclude_space_in_input
 from load_store_utils import resume_model
 from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, StationaryAllenCahnTask, OutputTask, DerivativeTask, Derivative2Task, SpatialDerivativeTask, SpatialDerivative2Task, TemporalDerivativeTask, TemporalDerivative2Task, ICTask, NeumannBCTask, DirichletBCTask
-from typing import List, Callable, Iterator
+from typing import List, Callable, Iterator, Tuple
 import itertools
 from itertools import cycle
 import time
@@ -41,7 +41,7 @@ D2U = 3
 PARAMS = 4
 BC = 5
 
-def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> List[Iterator]:
+def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> Tuple[List[Iterator], int]:
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -51,10 +51,12 @@ def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> L
     batch_sizes = []
     data_sizes = []
     max_len_idx = 0
+    max_len = -1
 
     for i, task_data in enumerate(datas):
         N = len(task_data)
-        if N > max_len_idx:
+        if N > max_len:
+            max_len = N
             max_len_idx = i
 
         if batch_size < N:
@@ -63,6 +65,7 @@ def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> L
 
         else:
             batch_sizes.append(N)
+
         data_sizes.append(N)
         print(f"batch size of task {i} = {batch_sizes[-1]}")
         print(f"dataset size of task {i}) = {data_sizes[-1]}")
@@ -76,9 +79,10 @@ def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> L
         dataloader = DataLoader(task_data, batch_sizes[i], generator=gen, shuffle=True)#, drop_last=True)
         if i == max_len_idx:
             iterators[i] = dataloader
+            steps_per_epoch = len(dataloader)
         else:
             iterators[i] = cycle(dataloader)
-    return iterators
+    return iterators, steps_per_epoch
 
 # =============================================== Run configuration ===============================================
 
@@ -110,11 +114,9 @@ def train_ARD(
         dwa_moving_avg_factor: float,
         dwa_moving_avg_frequency: int,
 
-        distil_model: Pinn,
-
         ewc: bool,
-        ewc_model: Pinn,
-        ewc_data: TensorDataset,
+        fisher_diag_avg: torch.Tensor,
+        fisher_diag_new: torch.Tensor,
         ewc_weight: float,
         ewc_auto_weighting: bool,
         ewc_warm_up: int,
@@ -123,7 +125,11 @@ def train_ARD(
 
         monitor_conflicts: bool,
         conflict_reference_task_idx: int,
+        monitor_weights: bool,
+        monitor_grads: bool,
+        monitor_grad_norms: bool,
 
+        clip_grad: bool,
         batch_size: int,
         learning_rate: float,
         epochs: int,
@@ -131,6 +137,12 @@ def train_ARD(
         seed=42,
         device="cpu"
 ):
+    # Set the model never model-selected (fixed) attributes
+    model.dwa_mode = dwa_mode
+    model.dwa_warm_up = dwa_warm_up
+    model.moving_avg_frequency = dwa_moving_avg_frequency
+
+    model.ewc_auto_weighting = ewc_auto_weighting
 
     def objective(trial):
         # Sample hyperparameters
@@ -139,8 +151,8 @@ def train_ARD(
         else:
             trial_batch_size = batch_size
         
-        train_iterators = get_iterators(datas = new_datas + recall_datas, batch_size = trial_batch_size, seed = seed)
-        eval_iterators = get_iterators(datas = val_datas + monitoring_datas, batch_size = trial_batch_size, seed = seed)
+        train_iterators, _ = get_iterators(datas = new_datas + recall_datas, batch_size = trial_batch_size, seed = seed)
+        eval_iterators, _ = get_iterators(datas = val_datas + monitoring_datas, batch_size = trial_batch_size, seed = seed)
         
         if type(learning_rate) is list:
             trial_learning_rate = trial.suggest_categorical("learning_rate", learning_rate)
@@ -160,20 +172,37 @@ def train_ARD(
         model.set_ff(fourier_features=trial_ff_size, frequency_variance=trial_ff_frequency_var)
 
         if ewc:
+            model.ewc_mode = "On"
+
             if type(ewc_weight) is list:
                 model.ewc_weight = trial.suggest_categorical("ewc_weight", ewc_weight)
             else:
                 model.ewc_weight = ewc_weight
+
+            if type(ewc_warm_up) is list:
+                model.ewc_warm_up = trial.suggest_categorical("ewc_warm_up", ewc_warm_up)
+            else:
+                model.ewc_warm_up = ewc_warm_up
+
+            if type(ewc_decay_factor) is list:
+                model.decay = trial.suggest_categorical("ewc_decay", ewc_decay)
+            else:
+                model.decay = ewc_decay_factor
+            
+            if type(ewc_moving_avg_factor) is list:
+                trial_ewc_moving_avg_factor = trial.suggest_categorical("ewc_moving_avg_factor", ewc_moving_avg_factor)
+            else:
+                trial_ewc_moving_avg_factor = ewc_moving_avg_factor
+            
+            model.ewc_fisher_diag = trial_ewc_moving_avg_factor * fisher_diag_new + (1 - trial_ewc_moving_avg_factor) * fisher_diag_avg
+        else:
+            model.ewc_mode = "Off"
         
         if dwa:
             if type(dwa_moving_avg_factor) is list:
                 model.alpha = trial.suggest_categorical("dwa_moving_avg_factor", dwa_moving_avg_factor)
             else:
                 model.alpha = dwa_moving_avg_factor
-
-            model.dwa_mode = dwa_mode
-            model.dwa_warm_up = dwa_warm_up
-            model.moving_avg_frequency = dwa_moving_avg_frequency
         
         for i, weight in enumerate(new_weights):
             if type(weight) is list:
@@ -196,20 +225,14 @@ def train_ARD(
         model.task_list = new_tasks + recall_tasks
         model.eval_task_list = val_tasks + monitoring_tasks
 
-        if ewc:
-            model.ewc_mode = "On"
-        else:
-            model.ewc_mode = "Off"
-        model.ewc_auto_weighting = ewc_auto_weighting
-        model.ewc_warm_up = ewc_warm_up
-        model.ewc_decay = ewc_decay_factor
-        
-
-        
-        ewc_moving_avg_factor: float,
-
         optimizer = Adam(params=model.parameters(), lr=trial_learning_rate)
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+
+        stats_dict = {}
+        #stats_dict["train_steps"] = []
+        stats_dict["epochs"] = []
+        stats_dict["times"] = []
+        stats_dict["loss"]["weighted_loss"] = []
 
         for epoch in range(epochs):
 
@@ -224,12 +247,14 @@ def train_ARD(
                 step_prefix = epoch * min(N, steps)
             start_time = time.time()
 
+            stats_dict["epochs"].append(epoch)
+            #stats_dict["train_loss_per_step"] = []
+
             for step, batches in enumerate(zip(*train_iterators)):
                 if steps >= 0 and step > steps:
                     break
 
-                stats_dict["train_steps"].append(step_prefix + step)
-                stats_dict["train_epochs"].append(epoch)
+                #stats_dict["train_steps"].append(step_prefix + step)
                 print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
 
                 x_list = []
@@ -259,20 +284,19 @@ def train_ARD(
 
                 # --- Backward pass ---
                 loss.backward()
-                stats_dict["train_loss_per_step"].append(loss.item())
+                #stats_dict["train_loss_per_step"].append(loss.item())
 
                 # --- Gradient clipping ---
                 if clip_grad:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-                if step % 4 == 0:
-                    # --- Compute total gradient norm ---
-                    total_grad_norm = 0.0
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            total_grad_norm += (p.grad.data.norm(2).item())**2
-                    total_grad_norm = total_grad_norm**0.5
-                    stats_dict["train_loss_grad_norm"].append(total_grad_norm)
+                # --- Compute total gradient norm ---
+                #total_grad_norm = 0.0
+                #for p in model.parameters():
+                #    if p.grad is not None:
+                #        total_grad_norm += (p.grad.data.norm(2).item())**2
+                #total_grad_norm = total_grad_norm ** 0.5
+                #stats_dict["train_loss_grad_norm"].append(total_grad_norm)
 
                 # Call the optimizer
                 optimizer.step()
@@ -280,24 +304,19 @@ def train_ARD(
             # ----------------------------------- End of epoch -----------------------------------
 
             lr_scheduler.step()
-            stats_dict["train_loss_per_epoch"].append(torch.mean(stats_dict["train_loss_per_step"][step_prefix : step_prefix + step]))
+
             stop_time = time.time()
             epoch_time = stop_time - start_time
             print(f'Epoch time: {epoch_time}')
             stats_dict["times"].append(epoch_time)
-            for task in model.task_list:
-                stats_dict["loss"][task.id].append(task.loss)
-                stats_dict["weights"][task.id].append(task.weight)
-                stats_dict["conflicts"][task.id].append(task.conflict)
-                stats_dict["grad_norms"][task.id].append(task.grad_norm)
-                stats_dict["grads"][task.id].append(task.grad)
+            #stats_dict["loss"]["weighted_loss"].append(torch.mean(stats_dict["train_loss_per_step"]))#[step_prefix : step_prefix + step]))
 
             # ------------------------------ Epoch evaluation ------------------------------
 
             if (step_prefix + step) % eval_every == 0:
                 stats_dict["eval_epochs"].append(epoch)
                 model.eval()
-                with torch.no_grad():
+                with torch.set_grad_enabled(monitor_grads or monitor_grad_norms or monitor_conflicts): #TODO: save eval stats correctly
                     weighted_loss_per_batch = []
                     for task in model.eval_task_list:
                         stats_dict["loss_per_batch"][task.id] = []

@@ -1,7 +1,8 @@
-torch
-numpy
+FiPy
 matplotlib
+numpy
 optuna
 PyYAML
-fipy
-sfepy
+scipy
+torch
+tqdm

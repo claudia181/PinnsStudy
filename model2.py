@@ -383,7 +383,7 @@ class Pinn(torch.nn.Module):
             loss, 
             self.parameters(), 
             create_graph=False, 
-            retain_graph=True, 
+            #retain_graph=True, 
             allow_unused=True
             )
 
@@ -451,7 +451,6 @@ class Pinn(torch.nn.Module):
         if self.ewc_mode == "Off" or self.ewc_model_weights is None or self.ewc_fisher_diag is None:
             # Compute the loss term
             ewc_loss = None
-
         else:
             # Compute the loss term
             ewc_loss = torch.sum(self.ewc_fisher_diag * ((self.get_weights() - self.ewc_model_weights) ** 2))
@@ -614,7 +613,16 @@ class Pinn(torch.nn.Module):
         return weighted_loss
 
 
-    def label(self, dataset: TensorDataset, spacetime_idx: int, param_idx: int, u_idx: int, du_idx: int, d2u_idx: int, param_subidxs: List[int] = None) -> TensorDataset:
+    def label(
+            self, 
+            dataset: TensorDataset, 
+            spacetime_idx: int, 
+            param_idx: int, 
+            u_idx: int, 
+            du_idx: int, 
+            d2u_idx: int, 
+            param_subidxs: List[int] = None
+        ) -> TensorDataset:
         """
         Label the dataset with model predictions.
 
@@ -646,7 +654,16 @@ class Pinn(torch.nn.Module):
             
         return TensorDataset(*tensors)
 
-    def get_fisher_diag(self, dataset: TensorDataset, spacetime_idx: int, param_idx: int, u_idx: int, du_idx: int, d2u_idx: int, param_subidxs: List[int] = None) -> torch.Tensor:
+    def get_fisher_diag(
+            self, 
+            dataset: TensorDataset, 
+            spacetime_idx: int, 
+            param_idx: int, 
+            u_idx: int, 
+            du_idx: int, 
+            d2u_idx: int, 
+            param_subidxs: List[int] = None
+    ) -> torch.Tensor:
         """
         Return the vector containing the diagonal of \n
         the Fisher information matrix \n
@@ -680,9 +697,10 @@ class Pinn(torch.nn.Module):
                     params = z[param_idx][:, param_subidxs]
 
             self.zero_grad()
+
+            old_dwa_mode = self.dwa_mode
             self.dwa_mode = "Off"
             self.ewc_mode = "Off"
-            self.distill_mode = "Forgetting"
 
             u_pred = self.forward(x, params)
             per_sample_loss = (u_pred - u) ** 2
@@ -717,5 +735,7 @@ class Pinn(torch.nn.Module):
         ])
 
         #fisher_diag_vector /= torch.mean(fisher_diag_vector)
+
+        self.dwa_mode = old_dwa_mode
 
         return fisher_diag_vector
