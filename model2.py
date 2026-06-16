@@ -42,7 +42,6 @@ class Pinn(torch.nn.Module):
             device: str,
             hidden_units: list,
             activation: nn.Module = nn.Tanh(),
-            input_units: int = None,
             temporal_input: int = 1,
             spatial_input: int = 2,
             fourier_features: int = -1,
@@ -77,10 +76,8 @@ class Pinn(torch.nn.Module):
             List of the hidden units of the model.
         activation : nn.Module
             Activation function of the network.
-        input_units : int
-            Total number of input units (space, time, additional parameters).
-        temporal_input : bool
-            True if the time is provided as input.
+        temporal_input : int
+            1 if the time is provided as input, 0 otw.
         spatial_input : int
             Number of spatial dimensions in input.
         fourier_features : int
@@ -127,19 +124,22 @@ class Pinn(torch.nn.Module):
         
         # Set the parameters
         self.device = device
+
         self.temporal_input = temporal_input
         self.spatial_input = spatial_input
+        self.param_input = param_input
+
         self.fourier_features = fourier_features
         self.frequency_variance = frequency_variance
         if fourier_features != -1:
             torch.manual_seed(42)
-            self.B = torch.randn(2 * spatial_input + temporal_input, fourier_features) * frequency_variance
+            self.B = torch.randn(2 * (spatial_input + temporal_input), fourier_features) * frequency_variance
             self.B = self.B.to(device)
+            self.input_units = 2 * (spatial_input + temporal_input) * fourier_features + param_input
         else:
             self.B = None
-        self.param_input = param_input
+            self.input_units = spatial_input + temporal_input + param_input
         
-        self.input_units = input_units
         self.hidden_units = hidden_units
 
         self.task_list = task_list
@@ -186,9 +186,6 @@ class Pinn(torch.nn.Module):
         # First layer
         if self.fourier_features == -1:
             net_dict['lin0'] = nn.Linear(self.input_units, self.hidden_units[0])
-        else:
-            n = self.spatial_input * self.fourier_features + len(self.param_input)
-            net_dict['lin0'] = nn.Linear(n, self.hidden_units[0])
         net_dict['act0'] = self.activation
 
         # Hidden layers
@@ -203,7 +200,7 @@ class Pinn(torch.nn.Module):
         #for i in range(0, len(hidden_units + 1)):
         #    init.xavier_normal_(net_dict[f"lin{i}"], gain=1.0)
 
-        # Save model
+        # Set the network architecture
         self.net = nn.Sequential(net_dict).to(self.device)
 
     def set_ff(self, fourier_features: int, frequency_variance: float) -> None:
@@ -211,10 +208,13 @@ class Pinn(torch.nn.Module):
         self.frequency_variance = frequency_variance
         if fourier_features != -1:
             torch.manual_seed(42)
-            self.B = torch.randn(2 * self.spatial_input + self.temporal_input, fourier_features) * frequency_variance
+            self.B = torch.randn(2 * (self.spatial_input + self.temporal_input), fourier_features) * frequency_variance
             self.B = self.B.to(self.device)
+            self.input_units = 2 * (self.spatial_input + self.temporal_input) * fourier_features + self.param_input
         else:
             self.B = None
+            self.input_units = self.spatial_input + self.temporal_input + self.param_input
+        self._build_net()
 
     # Forward function for batches of data
     def forward(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:

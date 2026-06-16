@@ -88,7 +88,7 @@ def load_stats(directory: str, key_list: list = None) -> dict:
     return stats_dict
 
 def save_model(
-        model: PdeNet,
+        model: Pinn,
         filepath: str # .pth
     ) -> None:
     """
@@ -109,21 +109,11 @@ def save_model(
         "model_state_dict": model.state_dict(),
         "fourier_features": model.fourier_features,
         "frequency_variance": model.frequency_variance,
-        "input_units": model.input_units,
+        "B": model.B,
+        "spatial_input": model.spatial_input,
+        "temporal_input": model.temporal_input,
+        "param_input": model.param_input,
         "hidden_units": model.hidden_units,
-        "device": model.device,
-        "ewc_weight": model.ewc_weight,
-        "ewc_auto_weighting": model.ewc_auto_weighting,
-        "ewc_warm_up": model.ewc_warm_up,
-        "ewc_decay": model.ewc_decay,
-        "alpha": model.alpha,
-        "weighted_avg_frequency": model.moving_avg_frequency,
-        "dwa_warm_up": model.dwa_warm_up,
-        "sys_mode": model.sys_mode,
-        "distill_mode": model.distill_mode,
-        "ewc_mode": model.ewc_mode,
-        "dwa_mode": model.dwa_mode,
-        "monitor_conflicts": model.monitor_conflicts,
         "activation": model.activation
     }
     # Save the checkpoint dictionary
@@ -131,85 +121,33 @@ def save_model(
 
 def resume_model(
         filepath: str,
-        device: str = "cpu",
-        dwa_mode: str = None,
-        monitor_conflicts: bool = None,
-        alpha: float = None,
-        weighted_avg_frequency: int = None,
-        dwa_warm_up: int = None,
-        ewc_mode: str = None,
-        ewc_weight: float = None,
-        ewc_auto_weighting: bool = None,
-        ewc_warm_up: int = None,
-        ewc_decay: float = None
+        device: str = "cpu"
         ) -> Pinn:
     """
     Load a saved model from a .pth file.
     """
     if not os.path.exists(filepath):
-            raise ValueError(f"File '{filepath}' not found.")
+        raise ValueError(f"File '{filepath}' not found.")
 
-    # Load the entire checkpoint dictionary
     checkpoint = torch.load(filepath, weights_only=False)
-
-    if dwa_mode is None: dwa_mode = checkpoint["dwa_mode"]
-    if alpha is None: alpha = checkpoint["alpha"]
-    if weighted_avg_frequency is None: weighted_avg_frequency = checkpoint["weighted_avg_frequency"]
-    if dwa_warm_up is None: dwa_warm_up = checkpoint["dwa_warm_up"]
-
-    if ewc_mode is None: ewc_mode = checkpoint["ewc_mode"]
-    if ewc_importance is None: ewc_importance = checkpoint["ewc_importance"]
-    if ewc_weight is None: ewc_weight = checkpoint["ewc_weight"]
-    if ewc_auto_weighting is None:
-        if "ewc_auto_weighting" in checkpoint.keys():
-            ewc_auto_weighting = checkpoint["ewc_auto_weighting"]
-        else:
-            ewc_auto_weighting = False
-    if ewc_warm_up is None:
-        if "ewc_warm_up" in checkpoint.keys():
-            ewc_warm_up = checkpoint["ewc_warm_up"]
-        else:
-            ewc_warm_up = 0
-    if ewc_decay is None:
-        if "ewc_decay" in checkpoint.keys():
-            ewc_decay = checkpoint["ewc_decay"]
-        else:
-            ewc_decay = 1.0
-    if bc_mode is None:
-        bc_mode = checkpoint["bc_mode"]
     
-    if monitor_conflicts is None:
-        if "monitor_conflicts" in checkpoint.keys():
-            monitor_conflicts = checkpoint["monitor_conflicts"]
-        else:
-            monitor_conflicts = False
-    
-    if "frequency_variance" in checkpoint.keys():
-        frequency_variance = checkpoint["frequency_variance"]
-    else:
-        frequency_variance = 1.0
-    
-    # Create a new instance of the distillation model architecture using the loaded parameters
     model = Pinn(
-        input_units=checkpoint["input_units"],
-        hidden_units=checkpoint["hidden_units"],
-        activation=checkpoint["activation"],
-        fourier_features=checkpoint["fourier_features"],
-        frequency_variance=frequency_variance,
-        device=device,
-        ewc_weight=ewc_weight,
-        ewc_auto_weighting=ewc_auto_weighting,
-        ewc_warm_up=ewc_warm_up,
-        ewc_decay=ewc_decay,
-        alpha=alpha,
-        ewc_mode=ewc_mode,
-        dwa_mode=dwa_mode,
-        moving_avg_frequency=weighted_avg_frequency,
-        dwa_warm_up=dwa_warm_up,
-        monitor_conflicts=monitor_conflicts,
-        ).to(device)
-
-    # Load the distillation model's state dictionary
-    model.load_state_dict(checkpoint['model_state_dict'])
-
+        device = device,
+        hidden_units = checkpoint["hidden_units"],
+        activation = checkpoint["activation"],
+        temporal_input = checkpoint["temporal_input"],
+        spatial_input = checkpoint["spatial_input"],
+        fourier_features = checkpoint["fourier_features"],
+        frequency_variance = checkpoint["frequency_variance"],
+        param_input = checkpoint["param_input"],
+        task_list = [],
+        eval_task_list = [],
+        ewc_mode = "Off",
+        dwa_mode = "Off",
+        monitor_conflicts = False
+    ).to(device)
+    
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.B = checkpoint["B"]
+    
     return model

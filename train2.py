@@ -14,11 +14,13 @@ import torch
 from torch.utils.data import TensorDataset, Subset, DataLoader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch import nn
 import argparse
 import numpy as np
 import random
 import os
 import yaml
+import math
 import optuna
 from optuna.trial import TrialState
 import shutil
@@ -89,60 +91,67 @@ def get_iterators(datas: List[TensorDataset], batch_size: float, seed: int) -> T
 def train_ARD(
         model: Pinn,
 
-        ff_size: int,
-        ff_frequency_var: float,
-
-        n_param_input: int,
+        ff: bool,
+        dwa: bool,
+        ewc: bool,
 
         new_tasks: List[PhysicsTask],
         new_datas: List[TensorDataset],
-        new_weights: List[float],
+        new_weights: List[float] | List[List[float]],
 
         recall_tasks: List[PhysicsTask],
         recall_datas: List[TensorDataset],
-        recall_weights: List[float],
+        recall_weights: List[float] | List[List[float]],
 
         val_tasks: List[PhysicsTask],
         val_datas: TensorDataset,
 
         monitoring_tasks: List[PhysicsTask],
         monitoring_datas: TensorDataset,
-        
-        dwa: bool,
-        dwa_mode: str,
-        dwa_warm_up: int,
-        dwa_moving_avg_factor: float,
-        dwa_moving_avg_frequency: int,
-
-        ewc: bool,
-        fisher_diag_avg: torch.Tensor,
-        fisher_diag_new: torch.Tensor,
-        ewc_weight: float,
-        ewc_auto_weighting: bool,
-        ewc_warm_up: int,
-        ewc_decay_factor: float,
-        ewc_moving_avg_factor: float,
 
         monitor_conflicts: bool,
-        conflict_reference_task_idx: int,
         monitor_weights: bool,
-        monitor_grads: bool,
         monitor_grad_norms: bool,
+        eval_every: int,
 
         clip_grad: bool,
-        batch_size: int,
-        learning_rate: float,
+        batch_size: int | List[int],
+        learning_rate: float | List[float],
         epochs: int,
         steps: int,
-        seed=42,
-        device="cpu"
+
+        seed: int = 42,
+        device: str = "cpu",
+
+        ff_size: int | List[int] = -1,
+        ff_frequency_var: float | List[float] = 1,
+
+        dwa_mode: str = "Off",
+        dwa_warm_up: int = 3,
+        dwa_moving_avg_factor: float | List[float] = 0.9,
+        dwa_moving_avg_frequency: int = 1,
+
+        fisher_diag_avg: torch.Tensor = None,
+        fisher_diag_new: torch.Tensor = None,
+        ewc_weight: float | List[float] = 0.0,
+        ewc_auto_weighting: bool = False,
+        ewc_warm_up: int | List[int] = 1,
+        ewc_decay_factor: float | List[float] = 1.0,
+        ewc_moving_avg_factor: float | List[float] = 1.0,
+
+        conflict_reference_task_idx: int = 0
 ):
     # Set the model never model-selected (fixed) attributes
-    model.dwa_mode = dwa_mode
-    model.dwa_warm_up = dwa_warm_up
-    model.moving_avg_frequency = dwa_moving_avg_frequency
+    model.conflict_reference_task = conflict_reference_task_idx
+    model.monitor_conflicts = monitor_conflicts
+    if dwa:
+        model.dwa_mode = dwa_mode
+        model.dwa_warm_up = dwa_warm_up
+        model.moving_avg_frequency = dwa_moving_avg_frequency
+    if ewc:
+        model.ewc_auto_weighting = ewc_auto_weighting
+    model.device = device
 
-    model.ewc_auto_weighting = ewc_auto_weighting
 
     def objective(trial):
         # Sample hyperparameters
@@ -151,25 +160,26 @@ def train_ARD(
         else:
             trial_batch_size = batch_size
         
-        train_iterators, _ = get_iterators(datas = new_datas + recall_datas, batch_size = trial_batch_size, seed = seed)
-        eval_iterators, _ = get_iterators(datas = val_datas + monitoring_datas, batch_size = trial_batch_size, seed = seed)
+        train_iterators, train_steps_per_epoch = get_iterators(datas = new_datas + recall_datas, batch_size = trial_batch_size, seed = seed)
+        eval_iterators, eval_steps_per_epoch = get_iterators(datas = val_datas + monitoring_datas, batch_size = trial_batch_size, seed = seed)
         
         if type(learning_rate) is list:
             trial_learning_rate = trial.suggest_categorical("learning_rate", learning_rate)
         else:
             trial_learning_rate = learning_rate
 
-        if type(ff_frequency_var) is list:
-            trial_ff_frequency_var = trial.suggest_categorical("ff_frequency_var", ff_frequency_var)
-        else:
-            trial_ff_frequency_var = ff_frequency_var
-        
-        if type(ff_size) is list:
-            trial_ff_size = trial.suggest_categorical("ff_size", ff_size)
-        else:
-            trial_ff_size = ff_size
-        
-        model.set_ff(fourier_features=trial_ff_size, frequency_variance=trial_ff_frequency_var)
+        if ff:
+            if type(ff_frequency_var) is list:
+                trial_ff_frequency_var = trial.suggest_categorical("ff_frequency_var", ff_frequency_var)
+            else:
+                trial_ff_frequency_var = ff_frequency_var
+
+            if type(ff_size) is list:
+                trial_ff_size = trial.suggest_categorical("ff_size", ff_size)
+            else:
+                trial_ff_size = ff_size
+
+            model.set_ff(fourier_features=trial_ff_size, frequency_variance=trial_ff_frequency_var)
 
         if ewc:
             model.ewc_mode = "On"
@@ -185,7 +195,7 @@ def train_ARD(
                 model.ewc_warm_up = ewc_warm_up
 
             if type(ewc_decay_factor) is list:
-                model.decay = trial.suggest_categorical("ewc_decay", ewc_decay)
+                model.decay = trial.suggest_categorical("ewc_decay", ewc_decay_factor)
             else:
                 model.decay = ewc_decay_factor
             
@@ -229,10 +239,25 @@ def train_ARD(
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
         stats_dict = {}
-        #stats_dict["train_steps"] = []
-        stats_dict["epochs"] = []
+        stats_dict["train_epochs"] = []
+        stats_dict["eval_epochs"] = []
         stats_dict["times"] = []
-        stats_dict["loss"]["weighted_loss"] = []
+        stats_dict["train_loss"] = []
+
+        stats_dict["weights"] = {}
+        for task in model.task_list:
+            stats_dict["weights"][task.id] = []
+
+        stats_dict["eval_loss"] = {}
+        stats_dict["eval_loss"]["weighted_loss"] = []
+        stats_dict["eval_conflicts"] = {}
+        stats_dict["eval_grad_norms"] = {}
+
+        for task in model.eval_task_list:
+            stats_dict["eval_loss"][task.id] = []
+            stats_dict["eval_conflicts"][task.id] = []
+            stats_dict["eval_grad_norms"][task.id] = []
+
 
         for epoch in range(epochs):
 
@@ -242,20 +267,20 @@ def train_ARD(
             model.train()
 
             if steps < 0:
-                step_prefix = epoch * N
+                step_prefix = epoch * train_steps_per_epoch
             else:
-                step_prefix = epoch * min(N, steps)
+                step_prefix = epoch * min(train_steps_per_epoch, steps)
             start_time = time.time()
 
-            stats_dict["epochs"].append(epoch)
-            #stats_dict["train_loss_per_step"] = []
+            stats_dict["train_epochs"].append(epoch)
+
+            train_loss_epoch = 0.0
 
             for step, batches in enumerate(zip(*train_iterators)):
                 if steps >= 0 and step > steps:
                     break
 
-                #stats_dict["train_steps"].append(step_prefix + step)
-                print(f'\nEpoch: {epoch}, step_prefix: {step_prefix}')
+                print(f"\nepoch: {epoch}, batch: {step}, step: {step_prefix + step}")
 
                 x_list = []
                 labels = {
@@ -284,7 +309,7 @@ def train_ARD(
 
                 # --- Backward pass ---
                 loss.backward()
-                #stats_dict["train_loss_per_step"].append(loss.item())
+                train_loss_epoch += loss.item()
 
                 # --- Gradient clipping ---
                 if clip_grad:
@@ -309,20 +334,30 @@ def train_ARD(
             epoch_time = stop_time - start_time
             print(f'Epoch time: {epoch_time}')
             stats_dict["times"].append(epoch_time)
-            #stats_dict["loss"]["weighted_loss"].append(torch.mean(stats_dict["train_loss_per_step"]))#[step_prefix : step_prefix + step]))
+            stats_dict["train_loss"].append(train_loss_epoch / train_steps_per_epoch)
 
             # ------------------------------ Epoch evaluation ------------------------------
 
             if (step_prefix + step) % eval_every == 0:
                 stats_dict["eval_epochs"].append(epoch)
                 model.eval()
-                with torch.set_grad_enabled(monitor_grads or monitor_grad_norms or monitor_conflicts): #TODO: save eval stats correctly
-                    weighted_loss_per_batch = []
+                with torch.set_grad_enabled(monitor_grad_norms or monitor_conflicts):
+                    if monitor_weights:
+                        for task in model.task_list:
+                            stats_dict["weights"][task.id].append(task.weight)
+                    loss_epoch = {}
+                    if monitor_conflicts:
+                        conflict_epoch = {}
+                    if monitor_grad_norms:
+                        grad_norm_epoch = {}
+
+                    eval_weighted_loss_epoch = 0.0
                     for task in model.eval_task_list:
-                        stats_dict["loss_per_batch"][task.id] = []
-                        stats_dict["conflicts_per_batch"][task.id] = []
-                        stats_dict["grad_norms_per_batch"][task.id] = []
-                        stats_dict["grads_per_batch"][task.id] = []
+                        loss_epoch[task.id] = 0.0
+                        if monitor_conflicts:
+                            conflict_epoch[task.id] = 0.0
+                        if monitor_grad_norms:
+                            grad_norm_epoch[task.id] = 0.0
 
                     for batches in zip(*eval_iterators):
                         x_list = []
@@ -353,33 +388,35 @@ def train_ARD(
                         for val_task, train_task in zip(val_tasks, model.task_list):
                             weighted_loss += train_task.weight * val_task.loss_value
 
-                        weighted_loss_per_batch.append(weighted_loss)
+                        eval_weighted_loss_epoch += weighted_loss
 
                         for task in model.eval_task_list:
-                            stats_dict["loss_per_batch"][task.id].append(task.loss_value)
-                            stats_dict["conflicts_per_batch"][task.id].append(task.conflict)
-                            stats_dict["grad_norms_per_batch"][task.id].append(task.grad_norm)
-                            stats_dict["grads_per_batch"][task.id].append(task.grad)
+                            loss_epoch[task.id] += task.loss_value
+                            if monitor_conflicts:
+                                conflict_epoch[task.id] += task.conflict
+                            if monitor_grad_norms:
+                                grad_norm_epoch[task.id] += task.grad_norm
 
-                    stats_dict["val_weighted_loss"].append(torch.mean(weighted_loss_per_batch))
+                    stats_dict["eval_loss"]["weighted_loss"].append(eval_weighted_loss_epoch / eval_steps_per_epoch)
                     for task in model.eval_task_list:
-                        stats_dict["loss"][task.id].append(torch.mean(stats_dict["loss_per_batch"][task.id]))
-                        stats_dict["conflicts"][task.id].append(torch.mean(stats_dict["conflicts_per_batch"][task.id]))
-                        stats_dict["grad_norms"][task.id].append(torch.mean(stats_dict["grad_norms_per_batch"][task.id]))
-                        stats_dict["grads"][task.id].append(torch.mean(stats_dict["grads_per_batch"][task.id]))
+                        stats_dict["eval_loss"][task.id].append(loss_epoch[task.id] / eval_steps_per_epoch)
+                        if monitor_conflicts:
+                            stats_dict["eval_conflicts"][task.id].append(conflict_epoch[task.id] / eval_steps_per_epoch)
+                        if monitor_grad_norms:
+                            stats_dict["eval_grad_norms"][task.id].append(grad_norm_epoch[task.id] / eval_steps_per_epoch)
 
-
-                    print(f"Validation weighted loss: {stats_dict['val_weighted_loss'][-1]}")
+                    print(f"Val weighted loss: {stats_dict["eval_loss"]["weighted_loss"][-1]}")
                     if math.isnan(stats_dict['val_weighted_loss'][-1]):
                         #raise ArithmeticError("You get a nan value.")
                         #to_report = torch.inf
                         #trial.report(to_report, step=epoch)
                         #raise optuna.exceptions.TrialPruned()
                         return None
-                    print(f"Output loss: {stats_dict['loss']['u'][-1]}")
+                    if "u" in stats_dict["eval_loss"].keys():
+                        print(f"Val output loss: {stats_dict['eval_loss']['u'][-1]}")
 
                     # Report intermediate result to Optuna
-                    to_report = sum([stats_dict["loss"][task.id] for task in val_tasks])
+                    to_report = sum([stats_dict["eval_loss"][task.id] for task in val_tasks])
                     trial.report(to_report, step=epoch)
 
                     # Check if the trial should be pruned
@@ -387,280 +424,53 @@ def train_ARD(
                         raise optuna.exceptions.TrialPruned()
         return stats_dict
 
-    
-def train_step_ARD(
+
+def train_0():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--destination", type=str, default="./experiment")
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--")
+
+    args = parser.parse_args()
+
+    print(args.epochs, args.lr, args.name)
+
+    model = Pinn(
+        device = "cpu",
+        hidden_units = [50, 50, 50, 50],
+        activation = nn.Tanh(),
+        temporal_input = 1,
+        spatial_input = 2,
+        param_input = 0
+    )
+
+    train_ARD(
+        model = model,
+        ff = False,
+        dwa = True,
+        ewc = False,
+        monitor_conflicts = True,
+        monitor_weights = True,
+        monitor_grad_norms= True,
+        eval_every = 10,
+        clip_grad = True,
+        batch_size = 1024,
+        learning_rate = [1e-2, 1e-3, 1e-4],
+        epochs = 200,
+        steps = 1000000,
+        device="cpu",
         
-        batch_list: List[torch.Tensor],# for tuple in zip(*list)
-        input_param_list: List[torch.Tensor],
-        labels: dict,
-):
-
-    x_list = [batch[X_ARD]
-    input_param_list = 
-
-        for step, (train_data, nl_data, bc_data, ic_data, nl_bc_data, nl_ic_data, distill_data) in enumerate(zip(train_iter, nl_iter, train_bc_iter, train_ic_iter, nl_bc_iter, nl_ic_iter, distill_iter)):
-            if train_steps >= 0 and step > train_steps:
-                break
-
-            # Load batches from dataloaders:
-            # ---- Domain data ----
-            x_train = train_data[X].to(device).float().requires_grad_(True)
-            u_train = train_data[U].to(device).float()
-            du_train = train_data[DU].to(device).float()
-            d2u_train = train_data[D2U].to(device).float()
-            pde_param_values = train_data[PDE_VALUES].to(device).float() # assumed sorted
-            # pde_params_in_input sorted
-            param_values_train = None
-            if pde_params_in_input is not []:
-                pde_param_values_train = pde_param_values[:, pde_params_in_input]
-                if torch.any(torch.isnan(pde_param_values_train)):
-                    raise ValueError("Some pde parameters required in model input are not provided by train dataset.")
-                param_values_train = pde_param_values_train
-            else:
-                pde_param_values_train = None
-            
-            ic_param_values = train_data[IC_VALUES].to(device).float() # assumed sorted
-            # ic_params_in_input sorted
-            if ic_params_in_input is not []:
-                ic_param_values_train = ic_param_values[:, ic_params_in_input]
-                if torch.any(torch.isnan(ic_param_values_train)):
-                    raise ValueError("Some ic parameters required in model input are not provided by train dataset.")
-                if param_values_train is not None:
-                    param_values_train = torch.cat([param_values_train, ic_param_values_train], dim=-1)
-                else:
-                    param_values_train = ic_param_values
-            else:
-                ic_param_values_train = None
-
-            residual_info_keys = train_data[RESIDUAL_KEYS].to(device).int()
-            residual_info_values = train_data[RESIDUAL_VALUES].to(device).float()
-            residual_info_dict = get_dictionary(residual_info_keys, residual_info_values, model.pde)
-
-            if nl_data[X] is not None:
-                x_nl = nl_data[X].to(device).float().requires_grad_(True)
-                pde_param_values = nl_data[PDE_VALUES].to(device).float() # assumed sorted
-                # pde_params_in_input sorted
-                if pde_params_in_input is not []:
-                    pde_param_values_nl = pde_param_values[:, pde_params_in_input]
-                    if torch.any(torch.isnan(pde_param_values_nl)):
-                        raise ValueError("Some pde parameters required in model input are not provided by train dataset.")
-                else:
-                    pde_param_values_nl = None
-
-                ic_param_values = nl_data[IC_VALUES].to(device).float() # assumed sorted
-                # pde_params_in_input sorted
-                if ic_params_in_input is not []:
-                    ic_param_values_nl = ic_param_values[:, ic_params_in_input]
-                    if torch.any(torch.isnan(ic_param_values_nl)):
-                        raise ValueError("Some ic parameters required in model input are not provided by unlabeled train dataset.")
-                else:
-                    ic_param_values_nl = None
-
-                residual_info_keys = nl_data[RESIDUAL_KEYS].to(device).int()
-                residual_info_values = nl_data[RESIDUAL_VALUES].to(device).float()
-                residual_info_dict_nl = get_dictionary(residual_info_keys, residual_info_values, model.pde)
-            else:
-                x_nl = None
-                pde_param_values_nl = None
-                ic_param_values_nl = None
-                residual_info_dict_nl = None
-
-            # ---- Boundary data ----
-            # -- train --
-            if bc_data[X] is not None:
-                x_bc = bc_data[X].to(device).float()
-                u_bc = bc_data[U].to(device).float()
-                du_bc = bc_data[DU].to(device).float()
-                outward_normal_bc = bc_data[OUTWARD_NORMAL].to(device).float()
-                if pde_params_in_input != []:
-                    pde_param_values_bc = bc_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                else:
-                    pde_param_values_bc = None
-                
-                if ic_params_in_input != []:
-                    ic_param_values_bc = bc_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                else:
-                    ic_param_values_bc = None
-                
-            else:
-                x_bc = None
-                u_bc = None
-                du_bc = None
-                outward_normal_bc = None
-                pde_param_values_bc = None
-                ic_param_values_bc = None
-            
-            # -- nl --
-            if nl_bc_data[X] is not None:
-                x_nl_bc = nl_bc_data[X].to(device).float()
-                u_nl_bc = nl_bc_data[U].to(device).float()
-                du_nl_bc = nl_bc_data[DU].to(device).float()
-                outward_normal_nl_bc = nl_bc_data[OUTWARD_NORMAL].to(device).float()
-                if pde_params_in_input != []:
-                    pde_param_values_nl_bc = nl_bc_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                else:
-                    pde_param_values_nl_bc = None
-                
-                if ic_params_in_input != []:
-                    ic_param_values_nl_bc = nl_bc_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                else:
-                    ic_param_values_nl_bc = None
-                
-            else:
-                x_nl_bc = None
-                u_nl_bc = None
-                du_nl_bc = None
-                outward_normal_nl_bc = None
-                pde_param_values_nl_bc = None
-                ic_param_values_nl_bc = None
-
-            # ---- Initial data ----
-            # -- train --
-            if ic_data[X] is not None:
-                x_ic = ic_data[X].to(device).float()
-                u_ic = ic_data[U].to(device).float()
-                if pde_params_in_input != []:
-                    pde_param_values_ic = ic_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                else:
-                    pde_param_values_ic = None
-
-                if ic_params_in_input != []:
-                        ic_param_values_ic = ic_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                else:
-                    ic_param_values_ic = None
-
-            else:
-                x_ic = None
-                u_ic = None
-                pde_param_values_ic = None
-                ic_param_values_ic = None
-            
-            # -- nl --
-            if nl_ic_data[X] is not None:
-                x_nl_ic = nl_ic_data[X].to(device).float()
-                u_nl_ic = nl_ic_data[U].to(device).float()
-                if pde_params_in_input != []:
-                    pde_param_values_nl_ic = nl_ic_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                else:
-                    pde_param_values_nl_ic = None
-
-                if ic_params_in_input != []:
-                        ic_param_values_nl_ic = nl_ic_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                else:
-                    ic_param_values_nl_ic = None
-
-            else:
-                x_nl_ic = None
-                u_nl_ic = None
-                pde_param_values_nl_ic = None
-                ic_param_values_nl_ic = None
-
-            # ---- Distill data ----
-            if distill_data[X] is None:
-                x_distill = None
-                u_distill = None
-                du_distill = None
-                d2u_distill = None
-                pde_param_values_distill = None
-                ic_param_values_distill = None
-            else:
-                x_distill = distill_data[X].to(device).float().requires_grad_(True)
-                u_distill = distill_data[U].to(device).float().requires_grad_(True)
-                du_distill = distill_data[DU].to(device).float().requires_grad_(True)
-                d2u_distill = distill_data[D2U].to(device).float().requires_grad_(True)
-                if pde_params_in_input != []:
-                    #.requires_grad_(True) TODO
-                    pde_param_values_distill = distill_data[PDE_VALUES].to(device).float()[:, pde_params_in_input]
-                    if torch.any(torch.isnan(pde_param_values_distill)):
-                        raise ValueError("Some pde parameters required in distill model input are not provided by distill dataset.")
-                else:
-                    pde_param_values_distill = None
-                
-                if ic_params_in_input != []:
-                    #.requires_grad_(True) TODO
-                    ic_param_values_distill = distill_data[IC_VALUES].to(device).float()[:, ic_params_in_input]
-                    if torch.any(torch.isnan(ic_param_values_distill)):
-                        raise ValueError("Some ic parameters required in distill model input are not provided by distill dataset.")
-                else:
-                    ic_param_values_distill = None
-            
-            optimizer.zero_grad()
-            
-            loss = model.loss_fn(
-                x = x_train,
-                pde_params=pde_param_values_train,
-                ic_params=ic_param_values_train,
-                u = u_train,
-                du = du_train,
-                d2u = d2u_train,
-                residual_data=residual_info_dict,
-                x_bc = x_bc,
-                n = outward_normal_bc,
-                pde_params_bc=pde_param_values_bc,
-                ic_params_bc=ic_param_values_bc,
-                u_bc = u_bc,
-                du_bc = du_bc,
-                x_ic = x_ic,
-                pde_params_ic=pde_param_values_ic,
-                ic_params_ic=ic_param_values_ic,
-                u_ic = u_ic,
-
-                x_nl = x_nl,
-                pde_params_nl=pde_param_values_nl,
-                ic_params_nl=ic_param_values_nl,
-                residual_data_nl=residual_info_dict_nl,
-                x_nl_bc = x_nl_bc,
-                n_nl = outward_normal_nl_bc,
-                pde_params_nl_bc=pde_param_values_nl_bc,
-                ic_params_nl_bc=ic_param_values_nl_bc,
-                u_nl_bc = u_nl_bc,
-                du_nl_bc = du_nl_bc,
-                x_nl_ic = x_nl_ic,
-                pde_params_nl_ic=pde_param_values_nl_ic,
-                ic_params_nl_ic=ic_param_values_nl_ic,
-                u_nl_ic = u_nl_ic,
-                
-                x_distill = x_distill,
-                pde_params_distill=pde_param_values_distill,
-                ic_params_distill=ic_param_values_distill,
-                u_distill = u_distill,
-                du_distill = du_distill,
-                d2u_distill = d2u_distill,
-                delayed_weights=delayed_weights
-                )
-            
-            # --- Backward pass ---
-            loss.backward()
-            stats_dict["train_loss"].append(loss.item())
-
-            # --- Gradient clipping ---
-            if clip_grad:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            if step % 4 == 0:
-                # --- Compute total gradient norm ---
-                total_grad_norm = 0.0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        total_grad_norm += (p.grad.data.norm(2).item())**2
-                total_grad_norm = total_grad_norm**0.5
-                stats_dict["train_loss_grad_norm"].append(total_grad_norm)
-
-                # --- Early stopping ---
-                if early_stop_value is not None and total_grad_norm < early_stop_value:
-                    print(f"Early stopping at epoch {epoch} (grad norm={total_grad_norm:.3e})")
-                    early_stopping = True
-                    break
-            
-            # Call the optimizer
-            optimizer.step()
-
-        if scheduler_mode is not None:
-            scheduler.step()
+    )
 
 
 
-
+def train_s():
+    model = resume_model(
+        filepath = model_filepath,
+        device = "cpu"
+    )
 
 
     actual_mode                 = get_param(actual_dict, "mode", default_val="Output")
