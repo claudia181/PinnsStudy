@@ -47,7 +47,7 @@ class PhysicsTask:
             lap: torch.Tensor = None,
             lap2: torch.Tensor = None,
             input_parameters: dict = None
-        ) -> torch.Tensor:
+    ) -> torch.Tensor:
         if input_parameters is None:
             input_parameters = {}
         all_parameters = self.parameters | input_parameters

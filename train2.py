@@ -29,7 +29,7 @@ import copy
 from optuna_objective import Objective
 from model2 import Pinn
 from data_utils import subsample, replace_labels, extract_TensorDataset, extract_boundary, extract_interior, include_time_in_input, exclude_space_in_input
-from load_store_utils import resume_model
+from load_store_utils import resume_model, save_model, save_stats
 from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, StationaryAllenCahnTask, OutputTask, DerivativeTask, Derivative2Task, SpatialDerivativeTask, SpatialDerivative2Task, TemporalDerivativeTask, TemporalDerivative2Task, ICTask, NeumannBCTask, DirichletBCTask
 from typing import List, Callable, Iterator, Tuple
 import itertools
@@ -97,10 +97,16 @@ def train_ARD(
 
         new_tasks: List[PhysicsTask],
         new_datas: List[TensorDataset],
+        new_with_labels: List[bool],
+        new_with_params: List[bool],
+        new_with_bc: List[bool],
         new_weights: List[float] | List[List[float]],
 
         recall_tasks: List[PhysicsTask],
         recall_datas: List[TensorDataset],
+        recall_with_labels: List[bool],
+        recall_with_params: List[bool],
+        recall_with_bc: List[bool],
         recall_weights: List[float] | List[List[float]],
 
         val_tasks: List[PhysicsTask],
@@ -108,6 +114,9 @@ def train_ARD(
 
         monitoring_tasks: List[PhysicsTask],
         monitoring_datas: TensorDataset,
+        monitoring_with_labels: List[bool],
+        monitoring_with_params: List[bool],
+        monitoring_with_bc: List[bool],
 
         monitor_conflicts: bool,
         monitor_weights: bool,
@@ -119,7 +128,16 @@ def train_ARD(
         learning_rate: float | List[float],
         epochs: int,
         steps: int,
+        destination_folder: str,
 
+        spacetime_index: int = X,
+        param_index: List[int] = ,
+        bc_index: List[int] = None,
+        u_index: List[int] = None, 
+        du_index: List[int] = None, 
+        d2u_index: List[int] = None,
+
+        n_trials: int = 1,
         seed: int = 42,
         device: str = "cpu",
 
@@ -152,7 +170,7 @@ def train_ARD(
         model.ewc_auto_weighting = ewc_auto_weighting
     model.device = device
 
-
+    # ************************************** Define the objective function to run **************************************
     def objective(trial):
         # Sample hyperparameters
         if type(batch_size) is list:
@@ -291,13 +309,18 @@ def train_ARD(
                 input_param_list = []
                 bc_list = []
 
-                for batch in batches:
+                for i, batch in enumerate(batches):
                     x_list.append(batch[X].to(device).float().requires_grad_(True))
-                    labels["u"].append(batch[U].to(device).float())
-                    labels["du"].append(batch[DU].to(device).float())
-                    labels["d2u"].append(batch[D2U].to(device).float())
-                    input_param_list.append(batch[PARAMS].to(device).float())
-                    bc_list.append(batch[BC].to(device).float())
+                    if new_with_labels[i]:
+                        labels["u"].append(batch[U].to(device).float())
+                        labels["du"].append(batch[DU].to(device).float())
+                        labels["d2u"].append(batch[D2U].to(device).float())
+                    else:
+
+                    if new_with_params[i]:
+                        input_param_list.append(batch[PARAMS].to(device).float())
+                    if new_with_bc:
+                        bc_list.append(batch[BC].to(device).float())
 
                 optimizer.zero_grad()
 
@@ -406,7 +429,7 @@ def train_ARD(
                             stats_dict["eval_grad_norms"][task.id].append(grad_norm_epoch[task.id] / eval_steps_per_epoch)
 
                     print(f"Val weighted loss: {stats_dict["eval_loss"]["weighted_loss"][-1]}")
-                    if math.isnan(stats_dict['val_weighted_loss'][-1]):
+                    if math.isnan(stats_dict["eval_loss"]["weighted_loss"][-1]):
                         #raise ArithmeticError("You get a nan value.")
                         #to_report = torch.inf
                         #trial.report(to_report, step=epoch)
@@ -422,20 +445,150 @@ def train_ARD(
                     # Check if the trial should be pruned
                     if trial.should_prune():
                         raise optuna.exceptions.TrialPruned()
-        return stats_dict
+
+        # Model in evaluation mode
+        model.eval()
+
+        if not trial.should_prune():
+            # Create the folder to store trials if it does not exixt
+            name = f"trialN{trial.number}"
+            trial.set_user_attr("trial_name", name)
+            os.makedirs(f"{destination_folder}/models/{name}", exist_ok=True)
+
+            # Save the model
+            save_model(model=model, filepath=f"{destination_folder}/models/{name}/model.pth")
+
+            # Save model stats
+            torch.save(stats_dict, f"{destination_folder}/models/{name}/stats.pth")
+
+        # Compute final validation performances:   
+        with torch.no_grad():
+            # Init
+            val_loss = {}
+            loss_epoch = {}
+            eval_weighted_loss_epoch = 0.0
+            for task in model.eval_task_list:
+                loss_epoch[task.id] = 0.0
+
+            # Scan the batches
+            for batches in zip(*eval_iterators):
+                x_list = []
+                labels = {
+                    "u": [],
+                    "du": [],
+                    "d2u": []
+                }      
+                input_param_list = []
+                bc_list = []
+
+                # Scan the tasks
+                for batch in batches:
+                    x_list.append(batch[X].to(device).float().requires_grad_(True))
+                    labels["u"].append(batch[U].to(device).float())
+                    labels["du"].append(batch[DU].to(device).float())
+                    labels["d2u"].append(batch[D2U].to(device).float())
+                    input_param_list.append(batch[PARAMS].to(device).float())
+                    bc_list.append(batch[BC].to(device).float())
+                
+                # Evaluate the model on the eval_tasks
+                model.eval_loss(
+                    x_list = x_list,
+                    input_param_list = input_param_list,
+                    labels = labels
+                )
+
+                # Accumulate the weighted loss
+                weighted_loss = 0.0
+                for val_task, train_task in zip(val_tasks, model.task_list):
+                    weighted_loss += train_task.weight * val_task.loss_value
+                eval_weighted_loss_epoch += weighted_loss
+
+                # Accumulate per-task losses
+                for task in model.eval_task_list:
+                    loss_epoch[task.id] += task.loss_value
+            
+            # Average across batches
+            val_loss["weighted_loss"] = eval_weighted_loss_epoch / eval_steps_per_epoch
+            for task in model.eval_task_list:
+                val_loss[task.id] = loss_epoch[task.id] / eval_steps_per_epoch
+                print(f"Val {task.id} loss: {val_loss[task.id]}")
+            print(f"Val weighted loss: {val_loss['weighted_loss']}")
+
+            # Save the final validation performances of the trial
+            torch.save(val_loss, f"{destination_folder}/models/{name}/final_validation_performances.pth")
+
+            # Compute the trial value
+            trial_loss_value = sum([val_loss[task.id] for task in val_tasks])
+
+        return trial_loss_value
+    # ******************************************************************************************************************
+    
+    # Set the sampler and the pruner for model selection
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=3, interval_steps=1)
+    #opt_pruner = optuna.pruners.ThresholdPruner(upper=threshold, n_warmup_steps=3)
+
+    # Create the study
+    study = optuna.create_study(direction="minimize", pruner=pruner, sampler=sampler)
+
+    # Start the model selection and training
+    study.optimize(objective, n_trials = n_trials)
+
+    print("best hyperparameters:", study.best_trial.params)
+    print("best value:", study.best_trial.value)
+
+    # Sort the (not pruned) trials by their objective value
+    all_trials = [t for t in study.trials if t.state != TrialState.PRUNED]
+    sorted_trials = sorted_trials = sorted(
+        all_trials,
+        key=lambda t: t.value
+        )
+
+    # Rename trial folders according to their final value: 0 -> best model, ..., n_trials -> worst (not pruned) model
+    for i, trial in enumerate(sorted_trials):
+        rank = i
+        # Define the new trial name according to the rank
+        old_name = trial.user_attrs.get("trial_name")
+        new_name = f"trial{rank}"
+        # Assign a rank attribute to the trial
+        trial.set_user_attr("rank", rank)
+        # Update the trial_name attribute
+        trial.set_user_attr("trial_name", new_name)
+        # Update the trial filename
+        new_filename = f"{destination_folder}/models/{new_name}"
+        old_filename = f"{destination_folder}/models/{old_name}"
+        if os.path.exists(new_filename):
+            if os.path.isfile(new_filename):
+                os.remove(new_filename)
+            elif os.path.isdir(new_filename):
+                shutil.rmtree(new_filename)
+        if os.path.exists(old_filename):
+            os.rename(old_filename, new_filename)
+            print(f"{old_name} --> {new_name}: objective value = {trial.value:.4f}")
 
 
 def train_0():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=-1)
+    parser.add_argument("--train_data", type=str, default="")
+    parser.add_argument("--val_data", type=str, default="")
+    parser.add_argument("--space", nargs="+", type=int, default=0)
+    parser.add_argument("--time", nargs="+", type=int, default=0)
+    parser.add_argument("--params", nargs="+", type=int, default=0)
     parser.add_argument("--destination", type=str, default="./experiment")
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--")
 
     args = parser.parse_args()
 
-    print(args.epochs, args.lr, args.name)
+    if args.epochs == -1:
+        raise ValueError(f"Specify the number of epochs.")
+    
+    trajectory = torch.load(args.train_data, weights_only=False)
+    boundary = extract_boundary(dataset=trajectory, shape="rectangle", t=0)
+    interior = extract_interior(dataset=trajectory, shape="rectangle", t=0)
+    
+    
 
     model = Pinn(
         device = "cpu",
@@ -449,27 +602,82 @@ def train_0():
     train_ARD(
         model = model,
         ff = False,
+
         dwa = True,
+        dwa_mode = "Std",
+        dwa_warm_up = 3,
+        dwa_moving_avg_factor = 0.9,
+        dwa_moving_avg_frequency = 1,
+
         ewc = False,
-        monitor_conflicts = True,
+        monitor_conflicts = False,
         monitor_weights = True,
         monitor_grad_norms= True,
         eval_every = 10,
         clip_grad = True,
         batch_size = 1024,
         learning_rate = [1e-2, 1e-3, 1e-4],
-        epochs = 200,
+        epochs = args.epochs,
         steps = 1000000,
-        device="cpu",
-        
+        device="cpu"
     )
 
-
-
 def train_s():
-    model = resume_model(
-        filepath = model_filepath,
-        device = "cpu"
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--epochs", type=int, default=-1)
+    parser.add_argument("--train_data", type=str, default="")
+    parser.add_argument("--val_data", type=str, default="")
+    parser.add_argument("--model", type=str, default="")
+    parser.add_argument("--destination", type=str, default="./experiment")
+    parser.add_argument("--device", type=str, default="cpu")
+
+    args = parser.parse_args()
+
+    trajectory = torch.load(args.train_data, weights_only=False)
+    timeline = [t for t in range(len(trajectory.datasets))]
+    boundary = [extract_boundary(dataset=trajectory, shape="rectangle", t=t) for t in timeline]
+    interior = [extract_interior(dataset=trajectory, shape="rectangle", t=t) for t in timeline]
+
+    if args.epochs == -1:
+        raise ValueError(f"Specify the number of epochs.")
+    
+    if args.model == "":
+        model = Pinn(
+            device = "cpu",
+            hidden_units = [50, 50, 50, 50],
+            activation = nn.Tanh(),
+            temporal_input = 1,
+            spatial_input = 2,
+            param_input = 0
+        )
+    else:
+        model = resume_model(
+            filepath = args.model,
+            device = "cpu"
+        )
+    
+    train_ARD(
+        model = model,
+        ff = False,
+
+        dwa = True,
+        dwa_mode = "Std",
+        dwa_warm_up = 3,
+        dwa_moving_avg_factor = 0.9,
+        dwa_moving_avg_frequency = 1,
+
+        ewc = False,
+        monitor_conflicts = False,
+        monitor_weights = True,
+        monitor_grad_norms= True,
+        eval_every = 10,
+        clip_grad = True,
+        batch_size = 1024,
+        learning_rate = [1e-2, 1e-3, 1e-4],
+        epochs = args.epochs,
+        steps = 1000000,
+        device="cpu"
     )
 
 

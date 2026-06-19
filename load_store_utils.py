@@ -18,79 +18,10 @@ import numpy as np
 import os
 from model2 import Pinn, LOSS_TERMS
 
-def save_stats(stats_dict: dict, directory: str) -> None:
-    """
-    Save the dictionary stats_dict as a set of csv and npy files in the directory directory.
-
-    For each key in stats_dict create
-    - {key}_keys.csv, containing the (ordered) keys in the subdictionary stats_dict[key];
-    - {key}_stats.npy, containing the (ordered) curves corresponding to the keys in the subdictionary stats_dict[key].
-
-    Parameters
-    ----------
-    stats_dict : dict
-    directory : str
-
-    Returns
-    -------
-    None
-    """
-    for key in stats_dict.keys():
-        curves = []
-        if key not in ["times", "weights", "conflicts", "grad_norms", "train_loss", "train_loss_grad_norm"]:
-            with open(f"{directory}/{key}_keys.csv", 'w') as f:
-                for k in LOSS_TERMS + ["weighted_loss", "step_list"]:
-                    curves.append(torch.tensor(stats_dict[key][k]).cpu().numpy())
-                    f.write(k + ",")
-        elif key in ["weights", "conflicts", "grad_norms"]:
-            with open(f"{directory}/{key}_keys.csv", 'w') as f:
-                for k in LOSS_TERMS + ["step_list"]:
-                    if None not in stats_dict[key][k]:
-                        curves.append(torch.tensor(stats_dict[key][k]).cpu().numpy())
-                        f.write(k + ",")
-        else:
-            curves.append(torch.tensor(stats_dict[key]).cpu().numpy())
-
-        # Stack loss curves
-        stacked_curves = np.column_stack(curves)
-        # Save loss curves
-        with open(f"{directory}/{key}_stats.npy", "wb") as f:
-            np.save(f, stacked_curves)
-
-def load_stats(directory: str, key_list: list = None) -> dict:
-    """
-    Return the dictionary constructed from the {directory}/{key}_keys.csv files, key in key_list.
-
-    If key_list is not passed, then ["train", "val", "weights", "conflicts", "grad_norms", "times", "train_loss", "train_loss_grad_norm"] is used.
-
-    Parameters
-    ----------
-    directory : str
-    key_list : list
-
-    Returns
-    -------
-    dict
-    """
-    if key_list is None:
-        key_list = ["train", "val", "weights", "conflicts", "grad_norms", "times", "train_loss", "train_loss_grad_norm"]
-    stats_dict = {}
-    for key in key_list:
-        stats_dict[key] = {}
-        if key not in ["times", "train_loss", "train_loss_grad_norm"]:
-            with open(f"{directory}/{key}_keys.csv", "r") as file:
-                stats_keys = file.readlines()[0].strip().split(",")
-            stats_data = np.load(f"{directory}/{key}_stats.npy")
-            for i in range(len(stats_keys)-1):
-                stats_dict[key][stats_keys[i]] = stats_data[:, i]
-        else:
-            stats_dict[key] = np.load(f"{directory}/{key}_stats.npy")
-    return stats_dict
-
 def save_model(
         model: Pinn,
         filepath: str # .pth
-    ) -> None:
+) -> None:
     """
     Save the model as a .pth file in {models_dir}/{name}/model.pth, that contains model state and training hyperparameters.
 
