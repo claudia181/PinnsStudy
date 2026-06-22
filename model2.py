@@ -551,7 +551,7 @@ class Pinn(torch.nn.Module):
 
             l_dict = {}
             for key in labels.keys():
-                if key in task.loss_inputs():
+                if key in task.loss_required_labels():
                     l_dict[key] = labels[key][i]
                 else:
                     raise ValueError("Missing input parameters")
@@ -601,7 +601,7 @@ class Pinn(torch.nn.Module):
 
             l_dict = {}
             for key in labels.keys():
-                if key in task.loss_inputs():
+                if key in task.loss_required_labels():
                     l_dict[key] = labels[key][i]
                 else:
                     raise ValueError("Missing input parameters")

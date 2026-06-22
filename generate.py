@@ -14,68 +14,90 @@ Functions:
 
 import numpy as np
 import torch
-from torch.utils.data import TensorDataset, ConcatDataset
+from torch.utils.data import ConcatDataset
+from phy_sys_dataset import PhySysDataset
 import random
 import os
 import yaml
 from typing import Any, Callable, List, Tuple, Set
 from allen_cahn import AllenCahn
 from advection_reaction_diffusion import AdvectionReactionDiffusion
+from phy_sys_dataset import PhySysDataset
 
-X               = 0
-U               = 1
-DU              = 2
-D2U             = 3
-OUTWARD_NORMAL  = 4
-
-def generate_AllenCahn(X: torch.Tensor, lam: float, xi: list, include_lam: bool = False, include_xi: bool = False) -> TensorDataset:
+def generate_AllenCahn(
+        X: torch.Tensor, 
+        lam: float, 
+        xi: list, 
+        include_lam: bool = False, 
+        include_xi: bool = False
+) -> PhySysDataset:
     pde = AllenCahn(lam=lam, force_params=xi)
     pde.set_spatial_points(x=X[:, 0], y=X[:, 1])
     #points = torch.stack([pde.x, pde.y], dim=1)
     pde.solve()
 
     params = []
+    param_keys = []
     if include_lam:
         params.append(lam)
+        param_keys.append("lam")
     if include_xi:
-        for item in xi:
+        for i, item in enumerate(xi):
             params.append(item)
+            param_keys.append(f"xi{i}")
     if params != []:
         params = torch.tensor(params).repeat(len(X), 1)
-        dataset = TensorDataset(
-                X, # X = 0
-                pde.u, # U = 1
-                pde.du, # DU = 2
-                pde.d2u, # D2U = 3
-                params # PARAMS = 4
-                )
+
+        dataset = PhySysDataset(cols=[
+            ("spacetime", X),
+            ("u", pde.u),
+            ("du", pde.du),
+            ("d2u", pde.d2u),
+            ("param", params)
+        ])
+        dataset.set_subkeys("param", param_keys)
     else:
-        dataset = TensorDataset(
-                X, # X = 0
-                pde.u, # U = 1
-                pde.du, # DU = 2
-                pde.d2u # D2U = 3
-                )
+        dataset = PhySysDataset(cols=[
+            ("spacetime", X),
+            ("u", pde.u),
+            ("du", pde.du),
+            ("d2u", pde.d2u)
+        ])
+    dataset.set_subkeys("spacetime", ["x", "y"])
     return dataset
 
-def generate_AllenCahn_unlabeled(X: torch.Tensor, lam: float = None, xi: list = None, include_lam: bool = False, include_xi: bool = False) -> TensorDataset:
+def generate_AllenCahn_unlabeled(
+        X: torch.Tensor, 
+        lam: float = None, 
+        xi: list = None, 
+        include_lam: bool = False, 
+        include_xi: bool = False
+) -> PhySysDataset:
     params = []
+    param_keys = []
     if include_lam:
         if lam is None:
             raise ValueError("Missing lambda parameter (lam = None).")
         else:
             params.append(lam)
+            param_keys.append("lam")
     if include_xi:
         if xi is None:
             raise ValueError("Missing xi parameter (xi = None).")
         else:
-            for item in xi:
+            for i, item in enumerate(xi):
                 params.append(item)
+                param_keys.append(f"xi{i}")
     if params == []:
-       dataset = TensorDataset(X)
+       dataset = PhySysDataset([("spacetime", X)])
     else:
         params = torch.tensor(params).repeat(len(X), 1)
-        dataset = TensorDataset(X, params)
+        dataset = PhySysDataset([
+            ("spacetime", X), 
+            ("param", params)
+        ])
+        dataset.set_subkeys("param", param_keys)
+    dataset.set_subkeys("spacetime", ["x", "y"])
     return dataset
 
 def help_rectangle() -> None:
@@ -187,31 +209,36 @@ def generate_AdvectionReactionDiffusion(
         t = torch.flatten(torch.tensor(time).repeat(len(x), 1))
         X = torch.stack([x, y, t], dim=1)
         params = []
+        param_keys = []
         if include_diffusion_coeff:
             diff_coeff = torch.flatten(torch.tensor(diffusion_coeff).repeat(len(x), 1))
             params.append(diff_coeff)
+            param_keys.append("D")
         if include_velocity_values:
             vx = torch.from_numpy(pde.velocity[i][0])
             params.append(vx)
+            param_keys.append("vx")
             vy = torch.from_numpy(pde.velocity[i][1])
             params.append(vy)
+            param_keys.append("vy")
         if include_source_values:
             s = torch.from_numpy(pde.source[i])
             params.append(s)
+            param_keys.append("s")
         if include_implicit_source_A:
             if A is None:
                 raise ValueError(f"Missing implicit source param 'A'.")
             a = torch.flatten(torch.tensor(A).repeat(len(x), 1))
             params.append(a)
+            param_keys.append("A")
         if include_implicit_source_B:
             if B is None:
                 raise ValueError(f"Missing implicit source param 'B'.")
             b = torch.flatten(torch.tensor(B).repeat(len(x), 1))
             params.append(b)
+            param_keys.append("B")
 
-        if params == []:
-            params = None
-        else:
+        if params != []:
             params = torch.stack(params, dim=1)
 
         bcs = None
@@ -223,38 +250,45 @@ def generate_AdvectionReactionDiffusion(
             else:
                 raise ValueError(f"Unknown domain shape '{shape}'.")
 
-        if params is not None and bcs is not None:
-            dataset = TensorDataset(
-                X,
-                u[i],
-                du[i],
-                d2u[i],
-                params,
-                bcs
-            )
-        elif params is not None:
-            dataset = TensorDataset(
-                X,
-                u[i],
-                du[i],
-                d2u[i],
-                params
-            )
+        if params != [] and bcs is not None:
+            dataset = PhySysDataset([
+                ("spacetime", X),
+                ("u", u[i]),
+                ("du", du[i]),
+                ("d2u", d2u[i]),
+                ("param", params),
+                ("bc", bcs)
+            ])
+            if shape == "rectangle":
+                dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
+            dataset.set_subkeys("param", param_keys)
+        elif params != []:
+            dataset = PhySysDataset([
+                ("spacetime", X),
+                ("u", u[i]),
+                ("du", du[i]),
+                ("d2u", d2u[i]),
+                ("param", params)
+            ])
+            dataset.set_subkeys("param", param_keys)
         elif bcs is not None:
-            dataset = TensorDataset(
-                X,
-                u[i],
-                du[i],
-                d2u[i],
-                bcs
-            )
+            dataset = PhySysDataset([
+                ("spacetime", X),
+                ("u", u[i]),
+                ("du", du[i]),
+                ("d2u", d2u[i]),
+                ("bc", bcs)
+            ])
+            if shape == "rectangle":
+                dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
         else:
-            dataset = TensorDataset(
-                X,
-                u[i],
-                du[i],
-                d2u[i]
-            )
+            dataset = PhySysDataset([
+                ("spacetime", X),
+                ("u", u[i]),
+                ("du", du[i]),
+                ("d2u", d2u[i])
+            ])
+        dataset.set_subkeys("spacetime", ["x", "y", "t"])
         datasets.append(dataset)
 
     return ConcatDataset(datasets)
@@ -289,9 +323,11 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         X = torch.stack([x, y, t], dim=1)
 
         params = []
+        param_keys = []
         if include_diffusion_coeff:
             diff_coeff = torch.flatten(torch.tensor(diffusion_coeff).repeat(len(x), 1))
             params.append(diff_coeff)
+            param_keys.append("D")
         if include_velocity_values:
             if velocity is None:
                 raise ValueError(f"Missing velocity vector field.")
@@ -300,25 +336,28 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             vy = torch.from_numpy(vy)
             params.append(vx)
             params.append(vy)
+            param_keys.append("vx")
+            param_keys.append("vy")
         if include_source_values:
             if source is None:
                 raise ValueError(f"Missing source scalar field.")
             s = source(x, y, t)
             params.append(s)
+            param_keys.append("s")
         if include_implicit_source_A:
             if A is None:
                 raise ValueError(f"Missing implicit source param 'A'.")
             a = torch.flatten(torch.tensor(A).repeat(len(x), 1))
             params.append(a)
+            param_keys.append("A")
         if include_implicit_source_B:
             if B is  None:
                 raise ValueError(f"Missing implicit source param 'B'.")
             b = torch.flatten(torch.tensor(B).repeat(len(x), 1))
             params.append(b)
+            param_keys.append("B")
 
-        if params == []:
-            params = None
-        else:
+        if params != []:
             params = torch.stack(params, dim=1)
     
         bcs = None
@@ -330,14 +369,33 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             else:
                 raise ValueError(f"Unknown domain shape '{shape}'.")
 
-        if params is not None and bcs is not None:
-            dataset = TensorDataset(X, params, bcs)
-        elif params is not None:
-            dataset = TensorDataset(X, params)
+        if params != [] and bcs is not None:
+            dataset = PhySysDataset([
+                ("spacetime", X), 
+                ("param", params), 
+                ("bc", bcs)
+            ])
+            dataset.set_subkeys("param", param_keys)
+            if shape == "rectangle":
+                dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
+        elif params != []:
+            dataset = PhySysDataset([
+                ("spacetime", X), 
+                ("param", params)
+            ])
+            dataset.set_subkeys("param", param_keys)
         elif bcs is not None:
-            dataset = TensorDataset(X, bcs)
+            dataset = PhySysDataset([
+                ("spacetime", X),
+                ("bc", bcs)
+            ])
+            if shape == "rectangle":
+                dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
         else:
-            dataset = TensorDataset(X)
+            dataset = PhySysDataset([
+                ("spacetime", X)
+            ])
+        dataset.set_subkeys("spacetime", ["x", "y", "t"])
         datasets.append(dataset)
 
     return ConcatDataset(datasets)

@@ -1,3 +1,4 @@
+
 """
 data_utils.py
 ===========
@@ -6,9 +7,12 @@ This module provides some functions for datasets manipulation.
 """
 
 import torch
-from torch.utils.data import TensorDataset, ConcatDataset
+from torch.utils.data import TensorDataset, ConcatDataset, DataLoader, Subset
 from generate import X, U, DU, D2U
-from typing import Tuple, List
+from typing import Tuple, List, Iterator
+from itertools import cycle
+import random
+from phy_sys_dataset import PhySysDataset
 
 DIM_LABEL_DICT = {"x": 0, "y": 1, "r": 2}
 
@@ -114,11 +118,11 @@ def filter_tensors(
     return [c[mask] for c in columns]
 
 def extract_TensorDataset(
-        dataset: ConcatDataset|TensorDataset, 
+        dataset: ConcatDataset|PhySysDataset, 
         time_indexes: list = None, 
         spatial_ranges: dict|List[dict] = {},
         shape: str = "rectangle"
-    ) -> TensorDataset:
+    ) -> PhySysDataset:
     """
     Construct a TensorDataset of filtered columns according to spatial_ranges.
 
@@ -139,7 +143,7 @@ def extract_TensorDataset(
     """
     if dataset is None:
         return None
-    if type(dataset) is TensorDataset: 
+    if type(dataset) is PhySysDataset: 
         datasets = [dataset]
     else:
         datasets = dataset.datasets
@@ -148,13 +152,16 @@ def extract_TensorDataset(
     tds = [datasets[i] for i in time_indexes]
     cols = []
     for td in tds:
-        tensors = td.tensors
+        tensors = td.columns()
         if cols == []:
             cols += tensors
         else:
             cols = [torch.cat((c1, c2)) for c1, c2 in zip(cols, tensors)]
     cols = filter_tensors(columns=cols, spatial_ranges=spatial_ranges, mode="closed", shape=shape)
-    return TensorDataset(*cols)
+    new_ds = PhySysDataset([(s, c) for s, c in zip(datasets[0].cols.keys(), cols)])
+    for key in datasets[0].subkeys.keys():
+        new_ds.set_subkeys(key, datasets[0].subkeys[key])
+    return new_ds
 
 def replace_labels(dataset: TensorDataset, labels: torch.Tensor) -> TensorDataset:
     """
@@ -393,3 +400,45 @@ def add_column(dataset: TensorDataset|ConcatDataset, column: torch.Tensor|List[t
         for tds, col in zip(dataset.datasets, column):
             new_dataset.append(TensorDataset(*tds.tensors, col))
         return ConcatDataset(new_dataset)
+    
+def get_iterators(datas: List[PhySysDataset], batch_size: float, seed: int) -> Tuple[List[Iterator], int]:
+    torch.manual_seed(seed)
+    random.seed(seed)
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+
+    batch_sizes = []
+    data_sizes = []
+    max_len_idx = 0
+    max_len = -1
+
+    for i, task_data in enumerate(datas):
+        N = len(task_data)
+        if N > max_len:
+            max_len = N
+            max_len_idx = i
+
+        if batch_size < N:
+            N = N - N % batch_size
+            batch_sizes.append(batch_size)
+
+        else:
+            batch_sizes.append(N)
+
+        data_sizes.append(N)
+        print(f"batch size of task {i} = {batch_sizes[-1]}")
+        print(f"dataset size of task {i}) = {data_sizes[-1]}")
+
+    for i, data_size in enumerate(data_sizes):
+        datas[i] = Subset(datas[i], list(range(data_size)))
+    
+    iterators = [None for _ in datas]
+    
+    for i, task_data in enumerate(datas):
+        dataloader = DataLoader(task_data, batch_sizes[i], generator=gen, shuffle=True)#, drop_last=True)
+        if i == max_len_idx:
+            iterators[i] = dataloader
+            steps_per_epoch = len(dataloader)
+        else:
+            iterators[i] = cycle(dataloader)
+    return iterators, steps_per_epoch

@@ -3,6 +3,7 @@ import torch
 from advection_reaction_diffusion import AdvectionReactionDiffusion
 from allen_cahn import AllenCahn
 from model2 import Pinn
+from typing import List, Tuple
 
 TASKS = ["PDE", "Output", "Derivative", "Derivative_x", "Derivative_t", "Hessian", "Hessian_x", "Hessian_t"]
 
@@ -52,6 +53,9 @@ class PhysicsTask:
             input_parameters = {}
         all_parameters = self.parameters | input_parameters
         return self._lhs(u=u, du=du, d2u=d2u, lap=lap, lap2=lap2, n=n, **all_parameters)
+    
+    def loss_required_labels(self) -> List[str]:
+        return []
 
 
 class NeumannBCTask(PhysicsTask):
@@ -75,13 +79,12 @@ class NeumannBCTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["du", "n"]
 
 class DirichletBCTask(PhysicsTask):
 
     def __init__(self, weight: float = None, device: str = "cpu"):
-
         def lhs(u: torch.Tensor) -> torch.Tensor:
             return u
 
@@ -98,12 +101,14 @@ class DirichletBCTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["u"]
     
 class ICTask(PhysicsTask):
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, indexes: List[int] = [], weight: float = None, device: str = "cpu"):
+
+        self.indexes = indexes
 
         def lhs(u: torch.Tensor) -> torch.Tensor:
             return u
@@ -121,7 +126,7 @@ class ICTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["u"]
     
 class OutputTask(PhysicsTask):
@@ -140,7 +145,7 @@ class OutputTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["u"]
     
 class DerivativeTask(PhysicsTask):
@@ -159,7 +164,7 @@ class DerivativeTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["du"]
     
 class SpatialDerivativeTask(PhysicsTask):
@@ -178,7 +183,7 @@ class SpatialDerivativeTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["du"]
     
 class TemporalDerivativeTask(PhysicsTask):
@@ -197,7 +202,7 @@ class TemporalDerivativeTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["du"]
 
 class Derivative2Task(PhysicsTask):
@@ -216,7 +221,7 @@ class Derivative2Task(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["d2u"]
 
 class SpatialDerivative2Task(PhysicsTask):
@@ -235,7 +240,7 @@ class SpatialDerivative2Task(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["d2u"]
 
 class TemporalDerivative2Task(PhysicsTask):
@@ -254,20 +259,19 @@ class TemporalDerivative2Task(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
+    def loss_required_labels(self) -> List[str]:
         return ["d2u"]
 
 class AdvectionReactionDiffusionTask(PhysicsTask):
 
-    def __init__(self, parameters: dict, velocity: Callable, source: Callable, D: float = None, implicit_source: str = None, A: float = None, B: float = None, weight: float = None, device: str = "cpu"):
-        self.velocity = velocity
-        self.source = source
-        self.implicit_source = implicit_source
-        self.A = A
-        self.B = B
+    def __init__(self, 
+            parameters: dict,
+            weight: float = None, 
+            device: str = "cpu"
+    ):
+        self.parameters = parameters
 
         def lhs(
-                x: torch.Tensor,
                 u: torch.Tensor, 
                 du: torch.Tensor, 
                 d2u: torch.Tensor,
@@ -278,7 +282,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             all_parameters = self.parameters | input_parameters
             return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **all_parameters)
 
-        def loss(x: torch.tensor, input_params: torch.Tensor, model: Pinn, u: torch.Tensor, du: torch.Tensor, d2u: torch.Tensor) -> torch.Tensor:
+        def loss(x: torch.tensor, input_params: torch.Tensor, model: Pinn) -> torch.Tensor:
 
             u = model.derivative(order=0, x=x, pde_params=input_params)
             du = model.derivative(order=1, x=x, pde_params=input_params)
@@ -298,17 +302,18 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
-        return ["u", "du", "d2u"]
+    def loss_required_labels(self) -> List[str]:
+        return []
 
 class StationaryAllenCahnTask(PhysicsTask):
 
     def __init__(self, parameters: dict, weight: float = None, device: str = "cpu"):
+
         def lhs(
                 u: torch.Tensor,
                 d2u: torch.Tensor,
                 input_parameters: dict
-            ) -> torch.Tensor:
+        ) -> torch.Tensor:
             if input_parameters is None:
                 input_parameters = {}
             all_parameters = self.parameters | input_parameters
@@ -333,5 +338,5 @@ class StationaryAllenCahnTask(PhysicsTask):
             device=device
         )
     
-    def loss_inputs(self):
-        return ["u", "d2u"]
+    def loss_required_labels(self) -> List[str]:
+        return []
