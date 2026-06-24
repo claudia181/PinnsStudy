@@ -503,7 +503,7 @@ def train(
             print(f"{old_name} --> {new_name}: objective value = {trial.value:.4f}")
 
 
-def train_0():
+def train_full():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--epochs", type=int, default=-1)
@@ -520,19 +520,29 @@ def train_0():
     if args.epochs == -1:
         raise ValueError(f"Specify the number of epochs.")
     
-    trajectory = PhySysDataset.load(args.train_data)
-    boundary = extract_boundary(dataset=trajectory, shape="rectangle", t=0)
-    interior = extract_interior(dataset=trajectory, shape="rectangle", t=0)
-    
-    
+    trajectory = PhySysDataset.load(args.train_data).datasets
+    boundary = [extract_boundary(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
+    interior = [extract_interior(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
 
+    param_keys = trajectory[0].subkeys["param"]
+    param_values = 
+    param_dict = {}
+    for k in param_keys:
+        param_dict[k] = 
+
+    train_tasks = [PhysicsTask(
+        task_id="ge",
+        parameters=
+    )]
+    
     model = Pinn(
-        device = "cpu",
+        device = args.device,
         hidden_units = [50, 50, 50, 50],
         activation = nn.Tanh(),
         temporal_input = 1,
         spatial_input = 2,
-        param_input = 0
+        param_input = 0,
+
     )
 
     train_ARD(

@@ -12,14 +12,10 @@ Functions:
     call the generate, save the dataset, if required, and return the dataset.
 """
 
-import numpy as np
 import torch
 from torch.utils.data import ConcatDataset
 from phy_sys_dataset import PhySysDataset
-import random
-import os
-import yaml
-from typing import Any, Callable, List, Tuple, Set
+from typing import Callable, Set
 from allen_cahn import AllenCahn
 from advection_reaction_diffusion import AdvectionReactionDiffusion
 from phy_sys_dataset import PhySysDataset
@@ -187,7 +183,7 @@ def generate_AdvectionReactionDiffusion(
     )
 
     pde.set_spatial_points(mode=shape, **spatial_region)
-    X = torch.stack([torch.from_numpy(pde.x), torch.from_numpy(pde.y)], dim=1)
+    #X = torch.stack([torch.from_numpy(pde.x), torch.from_numpy(pde.y)], dim=1)
     x = torch.from_numpy(pde.x)
     y = torch.from_numpy(pde.y)
     pde.set_IC(**ic)

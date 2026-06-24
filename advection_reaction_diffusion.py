@@ -735,8 +735,7 @@ class AdvectionReactionDiffusion:
         #lap: torch.Tensor,
         #lap2: torch.Tensor,
         
-        vx: torch.Tensor, 
-        vy: torch.Tensor,
+        v: torch.Tensor,
         D: float,
         source: torch.Tensor = None,
         implicit_source: str = None,
@@ -791,8 +790,8 @@ class AdvectionReactionDiffusion:
         uyy = d2u[:, 1, 1]
         # utt = d2u[:, 2, 2]
 
-        #vx = velocity[:, 0]
-        #vy = velocity[:, 1]
+        vx = v[:, 0]
+        vy = v[:, 1]
 
         diffusion_term = D * (uxx + uyy)
 

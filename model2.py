@@ -22,9 +22,7 @@ import torch
 from torch import nn
 from collections import OrderedDict
 from torch.func import vmap, jacrev, hessian
-from pde_utils import Pde, key_idx, ic_key_idx, key_str
 from torch.utils.data import DataLoader
-import os
 from torch.utils.data import TensorDataset
 from physics_task import PhysicsTask
 from typing import Tuple, List

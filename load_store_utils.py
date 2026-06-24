@@ -13,10 +13,8 @@ Functions:
 """
 
 import torch
-from torch.utils.data import TensorDataset, ConcatDataset
-import numpy as np
 import os
-from model2 import Pinn, LOSS_TERMS
+from model2 import Pinn
 
 def save_model(
         model: Pinn,
