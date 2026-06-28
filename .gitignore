@@ -4,4 +4,5 @@ myenv/
 __pycache__/
 AllenCahn/
 Pendulum/
-.vscode
+.vscode/
+.DS_Store/
