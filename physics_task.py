@@ -1,8 +1,39 @@
+"""
+physics_task.py
+===========
+
+This module implements physics tasks, which may relate to 
+boundary conditions, initial conditions, output learning, 
+derivative learning, physics-informed learning, etc.
+
+A generic PhysycsTask class is defined and all the physics tasks subclass it.
+
+Each specific physics task has to define
+    - an associated loss function, which defines how to compute the relative loss term;
+    - a loss_required_labels function, which returns the keys of the labels that are
+      necessary to compute the loss function of the task.
+
+Moreover any physics task has associated the following attributes:
+    - weight, containing the weight for the loss term of the task in the multi-objective loss;
+    - loss_value, optionally filled with the last loss value obtained for the task;
+    - grad_norm, optionally filled with the last gradient norm of the task loss term;
+    - grad, optionally filled with the last gradient of the task loss term;
+    - conflict, optionally filled with the last cosine similarity between the gradient of the 
+      task loss term and a reference gradient vector;
+    - parameters, a dictionary whose elements identify the physical system parameters whose 
+      values are fixed for all the training dataset entries (the ones whose value varies across 
+      the dataset entries are supposed to be inputed to the model in order to perform predictions;
+      hence, for physics-informed tasks, the varying physics parameters are expected to be part of 
+      the task loss function inputs).
+    - id, an identifier string for the task;
+    - device.
+"""
+
 from typing import Callable
 import torch
 from advection_reaction_diffusion import AdvectionReactionDiffusion
 from allen_cahn import AllenCahn
-from model2 import Pinn
+from model import Pinn
 from typing import List
 
 TASKS = ["PDE", "Output", "Derivative", "Derivative_x", "Derivative_t", "Hessian", "Hessian_x", "Hessian_t"]

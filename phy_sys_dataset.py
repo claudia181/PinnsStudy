@@ -1,3 +1,33 @@
+"""
+phy_sys_dataset.py
+===========
+
+This module implements the dataset containing the informations relative to a physical system
+(subcalssing the torch.utils.data.Dataset class).
+
+Attributes:
+    - cols: a dictionary {(col_name: str, col_values: torch.Tensor)}, where each element represent 
+            a column of the dataset and the column vaues are all tensors of the same length, 
+            which is the number of rows (# data points);
+    - length: the length of the dataset, i.e. the number of rows (# data points);
+    - subkeys: some columns may be tensors of vector values (e.g. the vector of spatio-temporal 
+               coordinates or the vector of parameters of the physical system); any of the entries 
+               of these vectors is associated with a subkey, which is a string; subkeys is a dictionary
+               {(col_key: str, subkey_list: List[str])}, where col_key is the column and subkey_list is the 
+               associated (ordered) list of subkeys. E.g. for the spatio-temporal coordinates
+               col_key = "spacetime", subkeys = ["x", "y", "t"].
+
+Methods:
+    - weight, containing the weight for the loss term of the task in the multi-objective loss;
+    - loss_value, optionally filled with the last loss value obtained for the task;
+    - grad_norm, optionally filled with the last gradient norm of the task loss term;
+    - grad, optionally filled with the last gradient of the task loss term;
+    - conflict, optionally filled with the last cosine similarity between the gradient of the 
+      task loss term and a reference gradient vector;
+    - id, an identifier string for the task;
+    - device.
+"""
+
 import torch
 from torch.utils.data import Dataset
 from typing import List, Callable, Tuple, Self

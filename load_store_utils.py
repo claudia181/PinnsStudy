@@ -14,7 +14,7 @@ Functions:
 
 import torch
 import os
-from model2 import Pinn
+from model import Pinn
 
 def save_model(
         model: Pinn,

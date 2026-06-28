@@ -21,7 +21,7 @@ import optuna
 from optuna.trial import TrialState
 import shutil
 
-from model2 import Pinn
+from model import Pinn
 from data_utils import extract_boundary, extract_interior, get_iterators
 from load_store_utils import resume_model, save_model
 from physics_task import PhysicsTask
@@ -84,7 +84,7 @@ def train(
         ewc_moving_avg_factor: float | List[float] = 1.0,
 
         conflict_reference_task_idx: int = 0
-):
+) -> None:
     # Set the model never model-selected (fixed) attributes
     model.conflict_reference_task = conflict_reference_task_idx
     model.monitor_conflicts = monitor_conflicts
