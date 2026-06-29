@@ -731,10 +731,6 @@ class AdvectionReactionDiffusion:
         u: torch.Tensor,
         du: torch.Tensor,
         d2u: torch.Tensor,
-
-        #lap: torch.Tensor,
-        #lap2: torch.Tensor,
-        
         v: torch.Tensor,
         D: float,
         source: torch.Tensor = None,
@@ -799,10 +795,6 @@ class AdvectionReactionDiffusion:
             source_term = source
         else:
             source_term = 0.0
-        #if implicit_source == "CahnHiliard":
-        #    return dut - 6*u*(dux**2 + duy**2) - (3*u**2-1)*lap + D*lap2
-
-        #else:
         if implicit_source == "AllenCahn":
             implicit_source_term = A * (u**3 - u)
         elif implicit_source == "logistic":

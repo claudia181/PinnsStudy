@@ -49,13 +49,27 @@ class PhysicsTask:
             loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = None,
             weight: float = None,
             device: str = "cpu"
-    ):
+    ) -> None:
         """
         Constructor.
 
         Parameters
         ----------
-        
+        task_id : str
+            Task identifier.
+        parameters : dict = None
+            Set of fixed parameters.
+        lhs : Callable[..., torch.Tensor] = None
+            Function that computes the left hand side of the equation (in case of physics-informed task).
+        loss : Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = None
+            Function that computes the loss term of the task.
+        weight : float = None
+            Current weight of the task (it weights the loss term of the task in the multi-objective loss function).
+        device : str = "cpu"
+
+        Returns
+        -------
+        None
         """
         self.id = task_id
         if parameters is None:
@@ -76,20 +90,52 @@ class PhysicsTask:
             u: torch.Tensor = None,
             du: torch.Tensor = None,
             d2u: torch.Tensor = None,
-            lap: torch.Tensor = None,
-            lap2: torch.Tensor = None,
             input_parameters: dict = None
     ) -> torch.Tensor:
+        """
+        Left hand side. It calls self._lhs.
+
+        Parameters
+        ----------
+        n : torch.Tensor = None
+            Outward normal vectors to the boundary.
+        u : torch.Tensor = None
+            Output labels.
+        du : torch.Tensor = None
+            1st derivative labels (vectors).
+        d2u : torch.Tensor = None
+            2nd derivative labels (matrices).
+        input_parameters : dict = None
+            Set of varying parameters, which are given in input to the model.
+        
+        Returns
+        -------
+        torch.Tensor
+        """
         if input_parameters is None:
             input_parameters = {}
         all_parameters = self.parameters | input_parameters
-        return self._lhs(u=u, du=du, d2u=d2u, lap=lap, lap2=lap2, n=n, **all_parameters)
+        return self._lhs(u=u, du=du, d2u=d2u, n=n, **all_parameters)
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        List[str]
+        """
         return []
 
 
 class NeumannBCTask(PhysicsTask):
+    """
+    Task for Neumann boundary condiitons.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -114,6 +160,9 @@ class NeumannBCTask(PhysicsTask):
         return ["du", "n"]
 
 class DirichletBCTask(PhysicsTask):
+    """
+    Task for Dirichlet boundary condiitons.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
         def lhs(u: torch.Tensor) -> torch.Tensor:
@@ -136,6 +185,9 @@ class DirichletBCTask(PhysicsTask):
         return ["u"]
     
 class ICTask(PhysicsTask):
+    """
+    Task for initial condiitons.
+    """
 
     def __init__(self, indexes: List[int] = [], weight: float = None, device: str = "cpu"):
 
@@ -161,6 +213,9 @@ class ICTask(PhysicsTask):
         return ["u"]
     
 class OutputTask(PhysicsTask):
+    """
+    Task for output learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -180,6 +235,9 @@ class OutputTask(PhysicsTask):
         return ["u"]
     
 class DerivativeTask(PhysicsTask):
+    """
+    Task for 1st derivative learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -199,6 +257,9 @@ class DerivativeTask(PhysicsTask):
         return ["du"]
     
 class SpatialDerivativeTask(PhysicsTask):
+    """
+    Task for 1st spatial derivative learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -218,6 +279,9 @@ class SpatialDerivativeTask(PhysicsTask):
         return ["du"]
     
 class TemporalDerivativeTask(PhysicsTask):
+    """
+    Task for 1st tempporal derivative learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -237,6 +301,9 @@ class TemporalDerivativeTask(PhysicsTask):
         return ["du"]
 
 class Derivative2Task(PhysicsTask):
+    """
+    Task for 2nd derivative learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -256,6 +323,9 @@ class Derivative2Task(PhysicsTask):
         return ["d2u"]
 
 class SpatialDerivative2Task(PhysicsTask):
+    """
+    Task for 2nd spatial derivative learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -275,6 +345,9 @@ class SpatialDerivative2Task(PhysicsTask):
         return ["d2u"]
 
 class TemporalDerivative2Task(PhysicsTask):
+    """
+    Task for 2nd temporal derivative learning.
+    """
 
     def __init__(self, weight: float = None, device: str = "cpu"):
 
@@ -294,6 +367,9 @@ class TemporalDerivative2Task(PhysicsTask):
         return ["d2u"]
 
 class AdvectionReactionDiffusionTask(PhysicsTask):
+    """
+    Task for the advection-reaction-diffusion governing equation.
+    """
 
     def __init__(self, 
             parameters: dict,
@@ -346,6 +422,9 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
         return []
 
 class StationaryAllenCahnTask(PhysicsTask):
+    """
+    Task for the stationary Allen-Cahn governing equation.
+    """
 
     def __init__(self, parameters: dict, weight: float = None, device: str = "cpu"):
 

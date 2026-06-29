@@ -2,17 +2,7 @@
 model.py
 ===========
 
-This module implements the continual PINN model class.
-
-Functions:
-- _get_dictionary: Constructs a dictionary object from a tensor of keys and a tensor of values.
-
-Global lists:
-- SYS_MODES     : system loss term modes (for the learning of the current task).
-- DISTILL_MODES : distillation loss term modes.
-- EWC_MODES     : elastic weight consolidation loss term modes.
-- DWA_MODES     : dynamic weight adaptation modes (loss balancing).
-- LOSS_TERMS    : loss terms keys.
+This module implements a PINN model.
 
 Classes:
 - Pinn: PINN class.
@@ -25,10 +15,14 @@ from torch.func import vmap, jacrev, hessian
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 from physics_task import PhysicsTask
+from phy_sys_dataset import PhySysDataset
 from typing import Tuple, List
 
-EWC_MODES       = ["On", "Off"]
-DWA_MODES       = ["Off", "Std", "Norm1", "NormK"]
+EWC_MODES = ["On", "Off"]
+DWA_MODES = ["Off", "Std", "Norm1", "NormK"]
+ACTIVATION = {
+    "tanh": nn.Tanh
+}
 
 # PINN class definition ----------------------
 class Pinn(torch.nn.Module):
@@ -39,18 +33,16 @@ class Pinn(torch.nn.Module):
             self,
             device: str,
             hidden_units: list,
-            activation: nn.Module = nn.Tanh(),
+            activation_str: str = "tanh",
             temporal_input: int = 1,
             spatial_input: int = 2,
-            fourier_features: int = -1,
-            frequency_variance: float = 1.0,
             param_input: int = 0,
             task_list: List[PhysicsTask] = [],
             eval_task_list: List[PhysicsTask] = [],
             ewc_mode: str = "Off",
             dwa_mode: str = "Off",
-            alpha: float = 0.9,
-            moving_avg_frequency: int = 1,
+            dwa_alpha: float = 0.9,
+            dwa_moving_avg_frequency: int = 1,
             dwa_warm_up: int = 0,
             monitor_conflicts: bool = False,
             conflict_reference_task: int = 0,
@@ -69,21 +61,14 @@ class Pinn(torch.nn.Module):
         Parameters
         ----------
         device : str
-            Device.
         hidden_units : list
             List of the hidden units of the model.
-        activation : nn.Module
-            Activation function of the network.
+        activation_str : str
+            String identifying the activation function of the network (according to ACTIVATION dict).
         temporal_input : int
             1 if the time is provided as input, 0 otw.
         spatial_input : int
             Number of spatial dimensions in input.
-        fourier_features : int
-            Number of Fourier features for the encoding of spatio-temporal coordinates;
-            -1 means that this encoding is not applied.
-        frequency_variance : float
-            Variance of the 0-centered Gaussian distribution 
-            from which the frequency matrix (B) for Fourier features are sampled.
         param_input : list
             Number of parametrization dimensions in input.
         task_list : List[PhysicsTask]
@@ -94,14 +79,15 @@ class Pinn(torch.nn.Module):
             Elastic weight consolidation mode ("On" or "Off").
         dwa_mode : str
             Dynamic weight adaptation mode ("Off", "Std", "Norm1", or "NormK").
-        alpha : float
+        dwa_alpha : float
             Moving average weight for dynamic weight adaptation.
-        moving_avg_frequency : int
+        dwa_moving_avg_frequency : int
             Moving average frequency for dynamic weight adaptation.
         dwa_warm_up : int
             Warm up steps for dynamic weight adaptation.
         monitor_conflicts : bool
-            If True and DWA is active, updates each task.conflict attribute with the cosine similarity btw the task gradient and the conflict_reference_task gradient.
+            If True and DWA is active, updates each task.conflict attribute with the cosine similarity 
+            btw the task gradient and the conflict_reference_task gradient.
         conflict_reference_task : int
             The objective wrt which the conflicts are computed.
         ewc_weight : float
@@ -117,6 +103,10 @@ class Pinn(torch.nn.Module):
         ewc_fisher_diag : torch.Tensor
             Diagonal elements of the fisher information matrix relative to ewc_model_weights,
             evaluated on some data.
+        
+        Returns
+        -------
+        None.
         """
         super().__init__(*args, **kwargs)
         
@@ -127,17 +117,11 @@ class Pinn(torch.nn.Module):
         self.spatial_input = spatial_input
         self.param_input = param_input
 
-        self.fourier_features = fourier_features
-        self.frequency_variance = frequency_variance
-        if fourier_features != -1:
-            torch.manual_seed(42)
-            self.B = torch.randn(2 * (spatial_input + temporal_input), fourier_features) * frequency_variance
-            self.B = self.B.to(device)
-            self.input_units = 2 * (spatial_input + temporal_input) * fourier_features + param_input
-        else:
-            self.B = None
-            self.input_units = spatial_input + temporal_input + param_input
-        
+        self.fourier_features = -1
+        self.frequency_variance = None
+        self.B = None
+
+        self.input_units = spatial_input + temporal_input + param_input
         self.hidden_units = hidden_units
 
         self.task_list = task_list
@@ -159,11 +143,12 @@ class Pinn(torch.nn.Module):
         self.dwa_mode = dwa_mode
         self.monitor_conflicts = monitor_conflicts
         self.conflict_reference_task = conflict_reference_task
-        self.alpha = alpha
-        self.moving_avg_frequency = moving_avg_frequency
+        self.dwa_alpha = dwa_alpha
+        self.dwa_moving_avg_frequency = dwa_moving_avg_frequency
         self.dwa_warm_up = dwa_warm_up
-        self.moving_avg_count = 0
-        self.activation = activation
+        self.dwa_moving_avg_count = 0
+        self.activation_str = activation_str
+        self.activation = ACTIVATION[activation_str]()
 
         # Build the network
         self._build_net()
@@ -175,6 +160,10 @@ class Pinn(torch.nn.Module):
         """
         Build the NN and save it in the 'net' state variable.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -182,8 +171,7 @@ class Pinn(torch.nn.Module):
         net_dict = OrderedDict()
 
         # First layer
-        if self.fourier_features == -1:
-            net_dict['lin0'] = nn.Linear(self.input_units, self.hidden_units[0])
+        net_dict['lin0'] = nn.Linear(self.input_units, self.hidden_units[0])
         net_dict['act0'] = self.activation
 
         # Hidden layers
@@ -201,23 +189,64 @@ class Pinn(torch.nn.Module):
         # Set the network architecture
         self.net = nn.Sequential(net_dict).to(self.device)
 
-    def set_ff(self, fourier_features: int, frequency_variance: float) -> None:
-        self.fourier_features = fourier_features
+    def set_ff(self, B: torch.Tensor) -> None:
+        """
+        Set the network with the fourier feature encoding of the spatio-temporal input using B as frequency matrix.
+
+        Parameters
+        ----------
+        B : torch.Tensor
+            The the frequency matrix of shape (dim(spacetime), n_features).
+
+        Returns
+        -------
+        None
+        """
+        # Set the encoding matrix B
+        self.B = B
+
+        # Update the model state
+        self.fourier_features = B.shape[1]
+        self.input_units = 2 * (self.spatial_input + self.temporal_input) * self.fourier_features + self.param_input
+
+        # Rebuild the network
+        self._build_net()
+    
+    def sample_B_and_set_ff(self, n_fourier_features: int, frequency_variance: float, seed: int = 42) -> None:
+        """
+        Sample the frequency matrix B and set the network with the fourier feature encoding of the spatio-temporal input.
+
+        Parameters
+        ----------
+        n_fourier_features : int
+            Number of Fourier features for the encoding of spatio-temporal coordinates.
+        frequency_variance : float
+            Variance of the 0-centered Gaussian distribution 
+            from which the frequency matrix (B) for Fourier features is sampled.
+        seed : int = 42
+            seed for the random sampling of B.
+
+        Returns
+        -------
+        None
+        """
+        # Sample the frequency matrix B
+        torch.manual_seed(seed)
+        self.B = torch.randn(2 * (self.spatial_input + self.temporal_input), n_fourier_features) * frequency_variance
+        self.B = self.B.to(self.device)
+
+        # Update the model state
+        self.fourier_features = n_fourier_features
         self.frequency_variance = frequency_variance
-        if fourier_features != -1:
-            torch.manual_seed(42)
-            self.B = torch.randn(2 * (self.spatial_input + self.temporal_input), fourier_features) * frequency_variance
-            self.B = self.B.to(self.device)
-            self.input_units = 2 * (self.spatial_input + self.temporal_input) * fourier_features + self.param_input
-        else:
-            self.B = None
-            self.input_units = self.spatial_input + self.temporal_input + self.param_input
+        self.input_units = 2 * (self.spatial_input + self.temporal_input) * self.fourier_features + self.param_input
+
+        # Rebuild the network
         self._build_net()
 
     # Forward function for batches of data
     def forward(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
         """
-        Perform NN inference on a batch of data.
+        Perform an inference step on a batch of data.
 
         Parameters
         ----------
@@ -241,7 +270,7 @@ class Pinn(torch.nn.Module):
     # Forward function for individual samples
     def _forward_single(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
         """
-        Perform NN inference on a single input.
+        Perform an inference step on a single input point.
 
         Parameters
         ----------
@@ -265,7 +294,12 @@ class Pinn(torch.nn.Module):
     # Concatenates all parameters (weights and biases) of a model into a single 1D tensor.
     def get_weights(self) -> torch.Tensor:
         """
-        Return the learnable parameters/weights of the PINN.
+        Concatenates all the learnable parameters (weights and biases) 
+        of the model into a single 1D tensor and returns it.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -360,7 +394,6 @@ class Pinn(torch.nn.Module):
         elif order == 2:   
             v = vmap(lap_of_lap)(x).squeeze()
         return v
-
     
     def _compute_grad_norm(self, loss: torch.Tensor) -> Tuple[Tuple[torch.Tensor, ...], torch.Tensor]:
         """
@@ -369,11 +402,11 @@ class Pinn(torch.nn.Module):
         Parameters
         ----------
         loss: torch.Tensor
-            Value of the loss function on some input.
+            Vector of loss function values on some input.
 
         Returns
         -------
-        <Tuple(torch.Tensor, ...), torch.Tensor>
+        Tuple(torch.Tensor, ...), torch.Tensor
             The gradient of the loss at some input and its L2 norm.
         """
         # Compute gradients of loss w.r.t. model parameters
@@ -401,18 +434,19 @@ class Pinn(torch.nn.Module):
         norm_b: torch.Tensor
         ) -> torch.Tensor:
         """
-        Compute the cosine similarity (the cosine of the angle) btw the gradients of the losses (gradient wrt the NN parameters/weights).
+        Compute the cosine similarity (the cosine of the angle) \n
+        btw the gradients of the losses (gradient wrt the NN parameters/weights).
 
         Parameters
         ----------
-        grads_a: tuple[torch.Tensor, ...]
-            Value of the loss gradient 'a' on some input.
-        grads_b: tuple[torch.Tensor, ...]
-            Value of the loss gradient 'b' on some input.
-        grads_a: tuple[torch.Tensor, ...]
-            Value of the loss gradient norm 'a'.
-        grads_b: tuple[torch.Tensor, ...]
-            Value of the loss gradient norm 'b'.
+        grads_a : tuple[torch.Tensor, ...]
+            Value of the loss gradient vector 'a' on some input.
+        grads_b : tuple[torch.Tensor, ...]
+            Value of the loss gradient vector 'b' on some input.
+        grads_a : tuple[torch.Tensor, ...]
+            Value of the norm of the loss gradient vector 'a'.
+        grads_b : tuple[torch.Tensor, ...]
+            Value of the norm of the loss gradient vector 'b'.
 
         Returns
         -------
@@ -441,6 +475,10 @@ class Pinn(torch.nn.Module):
         """
         Compute the EWC loss term on the given input.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         torch.Tensor
@@ -458,8 +496,15 @@ class Pinn(torch.nn.Module):
     def _update_task_weights(self) -> None:
         """
         Update the weight of each objective and the model state accordingly.
-        """
 
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         for task in self.task_list:
             task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
 
@@ -477,7 +522,7 @@ class Pinn(torch.nn.Module):
                 task.weight = 0.0
                 print("Weight reset.\n")
             else:
-                task.weight = self.alpha * task.weight + (1 - self.alpha) * weight_new
+                task.weight = self.dwa_alpha * task.weight + (1 - self.dwa_alpha) * weight_new
 
         if self.dwa_mode != "Std":
             active_weights = [task.weight for task in self.task_list]
@@ -497,6 +542,14 @@ class Pinn(torch.nn.Module):
     def _update_grad_norms(self) -> None:
         """
         Update the gradient norm of each objective and the model state accordingly.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         for task in self.task_list:
             task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
@@ -509,6 +562,14 @@ class Pinn(torch.nn.Module):
     def _update_eval_grad_norms(self) -> None:
         """
         Update the gradient norm of each evaluation task and the model state accordingly.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
         """
         for task in self.eval_task_list:
             task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
@@ -556,11 +617,11 @@ class Pinn(torch.nn.Module):
             
             task.loss_value = task.loss(x=x, input_params=input_params, model=self, **l_dict)
 
-        if self.dwa_mode != "Off" and self.moving_avg_count % self.moving_avg_frequency == 0 and self.moving_avg_count >= self.dwa_warm_up:
+        if self.dwa_mode != "Off" and self.dwa_moving_avg_count % self.dwa_moving_avg_frequency == 0 and self.dwa_moving_avg_count >= self.dwa_warm_up:
             self._update_task_weights()
         else:
             self._update_grad_norms()
-        self.moving_avg_count += 1
+        self.dwa_moving_avg_count += 1
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.task_list])
 
@@ -583,14 +644,29 @@ class Pinn(torch.nn.Module):
 
         return weighted_loss    
         
-
-    # Function that evaluate the various losses (1st order distillation, phase 2)
     def eval_loss(
             self,
             x_list: List[torch.Tensor],
-            input_param_list: List[torch.Tensor] = None, # pde, ic
+            input_param_list: List[torch.Tensor] = None,
             labels: dict = None
     ) -> torch.Tensor:
+        """
+        Validation loss function.
+
+        Parameters
+        ----------
+        x_list: List[torch.Tensor]
+            List of spatio-temporal inputs, one tensor (batch) for each task.
+        input_param_list : List[torch.Tensor]
+            List of physics parameters in input, one tensor (batch) for each task.
+        labels : dict
+            True labels, if some task needs (some of) them; dictionary of lists, where each list has one item (batch) for each task.
+
+        Returns
+        -------
+        torch.Tensor
+            The loss value.
+        """
         if labels is None:
             labels = {}
         for i, task in enumerate(self.eval_task_list):
@@ -613,28 +689,40 @@ class Pinn(torch.nn.Module):
 
     def label(
             self, 
-            dataset: TensorDataset, 
+            dataset: PhySysDataset, 
             spacetime_idx: int, 
             param_idx: int, 
             u_idx: int, 
             du_idx: int, 
             d2u_idx: int, 
             param_subidxs: List[int] = None
-        ) -> TensorDataset:
+        ) -> PhySysDataset:
         """
         Label the dataset with model predictions.
 
         Parameters
         ----------
-        dataset : TensorDataset
-            Dataset object.
+        dataset : PhySysDataset
+            The dataset to label.
+        spacetime_idx : int
+            Index of the spatio-temporal input.
+        param_idx : int
+            Index of the system parametrization input.
+        u_idx : int
+            Index of the output labels.
+        du_idx : int
+            Index of the 1st derivative labels.
+        d2u_idx : int
+            Index of the 2nd derivative labels.
+        param_subidxs : List[int] = None
+            Indexes of the system parameters in input.
 
         Returns
         -------
-        TensorDataset
+        PhySysDataset
             The labeled dataset.
         """
-        tensors = [t.clone() for t in dataset.tensors]
+        tensors = [t.clone() for t in dataset.columns()]
         x = tensors[spacetime_idx].float()
         self.eval()
         with torch.no_grad():
@@ -649,8 +737,9 @@ class Pinn(torch.nn.Module):
             tensors[u_idx] = self.forward(x, params)
             tensors[du_idx] = self.derivative(order=1, x=x, pde_params=params)
             tensors[d2u_idx] = self.derivative(order=2, x=x, pde_params=params)
-            
-        return TensorDataset(*tensors)
+        labeled_dataset = PhySysDataset(cols=([(key, val) for key, val in zip(dataset.cols.keys(), tensors)]))
+        labeled_dataset.subkeys = dataset.subkeys
+        return labeled_dataset
 
     def get_fisher_diag(
             self, 
@@ -658,8 +747,8 @@ class Pinn(torch.nn.Module):
             spacetime_idx: int, 
             param_idx: int, 
             u_idx: int, 
-            du_idx: int, 
-            d2u_idx: int, 
+            #du_idx: int, 
+            #d2u_idx: int, 
             param_subidxs: List[int] = None
     ) -> torch.Tensor:
         """
@@ -737,3 +826,56 @@ class Pinn(torch.nn.Module):
         self.dwa_mode = old_dwa_mode
 
         return fisher_diag_vector
+    
+    def save(
+        self,
+        filepath: str # .pth
+    ) -> None:
+        """
+        Save the model as a .pth in filepath, that contains model state and training hyperparameters.
+
+        Parameters
+        ----------
+        filepath : str
+            Filepath of the model file.
+
+        Returns
+        -------
+        None
+        """
+        checkpoint = {
+            "model_state_dict": self.state_dict(),
+
+            "device": self.device,
+
+            "spatial_input": self.spatial_input,
+            "temporal_input": self.temporal_input,
+            "param_input": self.param_input,
+
+            "fourier_features": self.fourier_features,
+            "frequency_variance": self.frequency_variance,
+            "B": self.B,
+
+            "input_units": self.input_units,
+            "hidden_units": self.hidden_units,
+            "activation_str": self.activation_str,
+
+            "dwa_mode": self.dwa_mode,
+            "dwa_alpha": self.dwa_alpha,
+            "dwa_moving_avg_frequency": self.dwa_moving_avg_frequency,
+            "dwa_warm_up": self.dwa_warm_up,
+
+            "ewc_mode": self.ewc_mode,
+            "ewc_weight": self.ewc_weight,
+            "ewc_auto_weighting": self.ewc_auto_weighting,
+            "ewc_model_weights": self.ewc_model_weights,
+            "ewc_fisher_diag": self.ewc_fisher_diag,
+
+            "monitor_conflicts": self.monitor_conflicts,
+            "conflict_reference_task": self.conflict_reference_task,
+
+            "train_tasks": [task.id for task in self.task_list],
+            "eval_tasks": [task.id for task in self.eval_task_list]
+        }
+        # Save the checkpoint dictionary
+        torch.save(checkpoint, filepath)
