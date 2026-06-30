@@ -24,7 +24,7 @@ import shutil
 from model import Pinn
 from data_utils import extract_boundary, extract_interior, get_iterators
 from load_store_utils import resume_model, save_model
-from physics_task import PhysicsTask
+from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, NeumannBCTask, DirichletBCTask
 from phy_sys_dataset import PhySysDataset
 
 from typing import List
@@ -67,12 +67,12 @@ def train(
         seed: int = 42,
         device: str = "cpu",
 
-        ff_size: int | List[int] = -1,
-        ff_frequency_var: float | List[float] = 1,
+        ff_size: int | List[int] = None,
+        ff_frequency_var: float | List[float] = None,
 
         dwa_mode: str = "Off",
+        dwa_alpha: float | List[float] = 0.9,
         dwa_warm_up: int = 3,
-        dwa_moving_avg_factor: float | List[float] = 0.9,
         dwa_moving_avg_frequency: int = 1,
 
         fisher_diag_avg: torch.Tensor = None,
@@ -82,18 +82,15 @@ def train(
         ewc_warm_up: int | List[int] = 1,
         ewc_decay_factor: float | List[float] = 1.0,
         ewc_moving_avg_factor: float | List[float] = 1.0,
+        ewc_objective_weights: torch.Tensor = None,
 
         conflict_reference_task_idx: int = 0
 ) -> None:
     # Set the model never model-selected (fixed) attributes
-    model.conflict_reference_task = conflict_reference_task_idx
-    model.monitor_conflicts = monitor_conflicts
-    if dwa:
-        model.dwa_mode = dwa_mode
-        model.dwa_warm_up = dwa_warm_up
-        model.moving_avg_frequency = dwa_moving_avg_frequency
-    if ewc:
-        model.ewc_auto_weighting = ewc_auto_weighting
+    model.set_conflict_monitoring(
+        monitor_conflicts = monitor_conflicts,
+        conflict_reference_task = conflict_reference_task_idx
+    )
     model.device = device
 
     # ************************************** Define the objective function to run **************************************
@@ -113,50 +110,66 @@ def train(
             trial_learning_rate = learning_rate
 
         if ff:
-            if type(ff_frequency_var) is list:
-                trial_ff_frequency_var = trial.suggest_categorical("ff_frequency_var", ff_frequency_var)
-            else:
-                trial_ff_frequency_var = ff_frequency_var
+            if ff_size is not None and ff_frequency_var is not None:
+                if type(ff_frequency_var) is list:
+                    trial_ff_frequency_var = trial.suggest_categorical("ff_frequency_var", ff_frequency_var)
+                else:
+                    trial_ff_frequency_var = ff_frequency_var
 
-            if type(ff_size) is list:
-                trial_ff_size = trial.suggest_categorical("ff_size", ff_size)
-            else:
-                trial_ff_size = ff_size
+                if type(ff_size) is list:
+                    trial_ff_size = trial.suggest_categorical("ff_size", ff_size)
+                else:
+                    trial_ff_size = ff_size
 
-            model.set_ff(fourier_features=trial_ff_size, frequency_variance=trial_ff_frequency_var)
+                model.sample_B_and_set_ff(
+                    n_fourier_features = trial_ff_size,
+                    frequency_variance = trial_ff_frequency_var
+                )
 
         if ewc:
-            model.ewc_mode = "On"
-
             if type(ewc_weight) is list:
-                model.ewc_weight = trial.suggest_categorical("ewc_weight", ewc_weight)
+                trial_ewc_weight = trial.suggest_categorical("ewc_weight", ewc_weight)
             else:
-                model.ewc_weight = ewc_weight
+                trial_ewc_weight = ewc_weight
 
             if type(ewc_warm_up) is list:
-                model.ewc_warm_up = trial.suggest_categorical("ewc_warm_up", ewc_warm_up)
+                trial_ewc_warm_up = trial.suggest_categorical("ewc_warm_up", ewc_warm_up)
             else:
-                model.ewc_warm_up = ewc_warm_up
+                trial_ewc_warm_up = ewc_warm_up
 
             if type(ewc_decay_factor) is list:
-                model.decay = trial.suggest_categorical("ewc_decay", ewc_decay_factor)
+                trial_ewc_decay = trial.suggest_categorical("ewc_decay", ewc_decay_factor)
             else:
-                model.decay = ewc_decay_factor
+                trial_ewc_decay = ewc_decay_factor
             
             if type(ewc_moving_avg_factor) is list:
                 trial_ewc_moving_avg_factor = trial.suggest_categorical("ewc_moving_avg_factor", ewc_moving_avg_factor)
             else:
                 trial_ewc_moving_avg_factor = ewc_moving_avg_factor
             
-            model.ewc_fisher_diag = trial_ewc_moving_avg_factor * fisher_diag_new + (1 - trial_ewc_moving_avg_factor) * fisher_diag_avg
-        else:
-            model.ewc_mode = "Off"
+            ewc_fisher_diag = trial_ewc_moving_avg_factor * fisher_diag_new + (1 - trial_ewc_moving_avg_factor) * fisher_diag_avg
+
+            model.set_ewc(
+                ewc_objective_weights = ewc_objective_weights,
+                ewc_fisher_diag = ewc_fisher_diag,
+                ewc_weight = trial_ewc_weight,
+                ewc_auto_weighting = ewc_auto_weighting,
+                ewc_warm_up = trial_ewc_warm_up,
+                ewc_decay = trial_ewc_decay
+            )
         
         if dwa:
-            if type(dwa_moving_avg_factor) is list:
-                model.alpha = trial.suggest_categorical("dwa_moving_avg_factor", dwa_moving_avg_factor)
+            if type(dwa_alpha) is list:
+                trial_dwa_alpha = trial.suggest_categorical("dwa_alpha", dwa_alpha)
             else:
-                model.alpha = dwa_moving_avg_factor
+                trial_dwa_alpha = dwa_alpha
+            
+            model.set_dwa(
+                dwa_mode = dwa_mode,
+                dwa_alpha = trial_dwa_alpha,
+                moving_avg_frequency = dwa_moving_avg_frequency,
+                dwa_warm_up = dwa_warm_up
+            )
         
         for i, weight in enumerate(new_weights):
             if type(weight) is list:
@@ -175,9 +188,9 @@ def train(
             task.grad = None
             task.conflict = None
             task.loss_value = None
-        
-        model.task_list = new_tasks + recall_tasks
-        model.eval_task_list = val_tasks + monitoring_tasks
+
+        model.set_train_tasks(new_tasks + recall_tasks)
+        model.set_eval_tasks(val_tasks + monitoring_tasks)
 
         optimizer = Adam(params=model.parameters(), lr=trial_learning_rate)
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
@@ -189,7 +202,7 @@ def train(
         stats_dict["train_loss"] = []
 
         stats_dict["weights"] = {}
-        for task in model.task_list:
+        for task in model.train_task_list:
             stats_dict["weights"][task.id] = []
 
         stats_dict["eval_loss"] = {}
@@ -292,7 +305,7 @@ def train(
                 model.eval()
                 with torch.set_grad_enabled(monitor_grad_norms or monitor_conflicts):
                     if monitor_weights:
-                        for task in model.task_list:
+                        for task in model.train_task_list:
                             stats_dict["weights"][task.id].append(task.weight)
                     loss_epoch = {}
                     if monitor_conflicts:
@@ -339,7 +352,7 @@ def train(
                         )
 
                         weighted_loss = 0.0
-                        for val_task, train_task in zip(val_tasks, model.task_list):
+                        for val_task, train_task in zip(val_tasks, model.train_task_list): #TODO
                             weighted_loss += train_task.weight * val_task.loss_value
 
                         eval_weighted_loss_epoch += weighted_loss
@@ -435,7 +448,7 @@ def train(
 
                 # Accumulate the weighted loss
                 weighted_loss = 0.0
-                for val_task, train_task in zip(val_tasks, model.task_list):
+                for val_task, train_task in zip(val_tasks, model.train_task_list): #TODO
                     weighted_loss += train_task.weight * val_task.loss_value
                 eval_weighted_loss_epoch += weighted_loss
 
@@ -509,9 +522,7 @@ def train_full():
     parser.add_argument("--epochs", type=int, default=-1)
     parser.add_argument("--train_data", type=str, default="")
     parser.add_argument("--val_data", type=str, default="")
-    parser.add_argument("--space", nargs="+", type=int, default=0)
-    parser.add_argument("--time", nargs="+", type=int, default=0)
-    parser.add_argument("--params", nargs="+", type=int, default=0)
+    parser.add_argument("--fixed_params", type=str, default="")
     parser.add_argument("--destination", type=str, default="./experiment")
     parser.add_argument("--device", type=str, default="cpu")
 
@@ -524,41 +535,58 @@ def train_full():
     boundary = [extract_boundary(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
     interior = [extract_interior(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
 
-    param_keys = trajectory[0].subkeys["param"]
-    param_values = 
-    param_dict = {}
-    for k in param_keys:
-        param_dict[k] = 
+    if args.fixed_params != "":
+        param_dict = torch.load(args.fixed_params)
+    else:
+        param_dict = {}
 
-    train_tasks = [PhysicsTask(
-        task_id="ge",
-        parameters=
-    )]
+    train_tasks = [
+        AdvectionReactionDiffusionTask(
+            parameters=param_dict,
+            velocity=
+            weight=
+        )
+    ]
     
     model = Pinn(
-        device = args.device,
+        device = args.device,#TODO
         hidden_units = [50, 50, 50, 50],
-        activation = nn.Tanh(),
+        activation_str = "tanh",
         temporal_input = 1,
         spatial_input = 2,
-        param_input = 0,
-
+        param_input = 0
     )
 
-    train_ARD(
+    train(
         model = model,
         ff = False,
 
         dwa = True,
         dwa_mode = "Std",
         dwa_warm_up = 3,
-        dwa_moving_avg_factor = 0.9,
+        dwa_alpha = 0.9,
         dwa_moving_avg_frequency = 1,
 
         ewc = False,
+
+        new_tasks =
+        new_datas =
+        new_weights =
+
+        recall_tasks =
+        recall_datas =
+        recall_weights =
+
+        val_tasks =
+        val_datas =
+
+        monitoring_tasks =
+        monitoring_datas =
+
         monitor_conflicts = False,
         monitor_weights = True,
         monitor_grad_norms= True,
+
         eval_every = 10,
         clip_grad = True,
         batch_size = 1024,
@@ -592,36 +620,10 @@ def train_s():
         model = Pinn(
             device = "cpu",
             hidden_units = [50, 50, 50, 50],
-            activation = nn.Tanh(),
+            activation_str = "tanh",
             temporal_input = 1,
             spatial_input = 2,
             param_input = 0
         )
     else:
-        model = resume_model(
-            filepath = args.model,
-            device = "cpu"
-        )
-    
-    train_ARD(
-        model = model,
-        ff = False,
-
-        dwa = True,
-        dwa_mode = "Std",
-        dwa_warm_up = 3,
-        dwa_moving_avg_factor = 0.9,
-        dwa_moving_avg_frequency = 1,
-
-        ewc = False,
-        monitor_conflicts = False,
-        monitor_weights = True,
-        monitor_grad_norms= True,
-        eval_every = 10,
-        clip_grad = True,
-        batch_size = 1024,
-        learning_rate = [1e-2, 1e-3, 1e-4],
-        epochs = args.epochs,
-        steps = 1000000,
-        device="cpu"
-    )
+        model = Pinn.load(filepath = args.model)

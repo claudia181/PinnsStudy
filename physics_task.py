@@ -25,8 +25,7 @@ Moreover any physics task has associated the following attributes:
       the dataset entries are supposed to be inputed to the model in order to perform predictions;
       hence, for physics-informed tasks, the varying physics parameters are expected to be part of 
       the task loss function inputs).
-    - id, an identifier string for the task;
-    - device.
+    - id, an identifier string for the task.
 """
 
 from typing import Callable
@@ -35,8 +34,6 @@ from advection_reaction_diffusion import AdvectionReactionDiffusion
 from allen_cahn import AllenCahn
 from model import Pinn
 from typing import List
-
-TASKS = ["PDE", "Output", "Derivative", "Derivative_x", "Derivative_t", "Hessian", "Hessian_x", "Hessian_t"]
 
 # ===================================== PhysicsTask class =====================================
 class PhysicsTask:
@@ -47,8 +44,7 @@ class PhysicsTask:
             parameters: dict = None,
             lhs: Callable[..., torch.Tensor] = None,
             loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = None,
-            weight: float = None,
-            device: str = "cpu"
+            weight: float = None
     ) -> None:
         """
         Constructor.
@@ -65,7 +61,6 @@ class PhysicsTask:
             Function that computes the loss term of the task.
         weight : float = None
             Current weight of the task (it weights the loss term of the task in the multi-objective loss function).
-        device : str = "cpu"
 
         Returns
         -------
@@ -83,7 +78,6 @@ class PhysicsTask:
         self.grad = None
         self.conflict = None
         self.loss_value = None
-        self.device = device
     
     def lhs(self,
             n: torch.Tensor = None,
@@ -137,7 +131,7 @@ class NeumannBCTask(PhysicsTask):
     Task for Neumann boundary condiitons.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def lhs(du: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
             outward_flux = (du[:, :2] * n).sum(dim=1)
@@ -152,8 +146,7 @@ class NeumannBCTask(PhysicsTask):
             task_id="NeumannBC",
             lhs=lhs,
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -164,7 +157,7 @@ class DirichletBCTask(PhysicsTask):
     Task for Dirichlet boundary condiitons.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
         def lhs(u: torch.Tensor) -> torch.Tensor:
             return u
 
@@ -177,8 +170,7 @@ class DirichletBCTask(PhysicsTask):
             task_id="DirichletBC",
             lhs=lhs,
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -189,7 +181,7 @@ class ICTask(PhysicsTask):
     Task for initial condiitons.
     """
 
-    def __init__(self, indexes: List[int] = [], weight: float = None, device: str = "cpu"):
+    def __init__(self, indexes: List[int] = [], weight: float = None):
 
         self.indexes = indexes
 
@@ -205,8 +197,7 @@ class ICTask(PhysicsTask):
             task_id="IC",
             lhs=lhs,
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -217,7 +208,7 @@ class OutputTask(PhysicsTask):
     Task for output learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -227,8 +218,7 @@ class OutputTask(PhysicsTask):
         super().__init__(
             task_id="Output",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -239,7 +229,7 @@ class DerivativeTask(PhysicsTask):
     Task for 1st derivative learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -249,8 +239,7 @@ class DerivativeTask(PhysicsTask):
         super().__init__(
             task_id="Derivative",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -261,7 +250,7 @@ class SpatialDerivativeTask(PhysicsTask):
     Task for 1st spatial derivative learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -271,8 +260,7 @@ class SpatialDerivativeTask(PhysicsTask):
         super().__init__(
             task_id="Derivative_x",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -283,7 +271,7 @@ class TemporalDerivativeTask(PhysicsTask):
     Task for 1st tempporal derivative learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -293,8 +281,7 @@ class TemporalDerivativeTask(PhysicsTask):
         super().__init__(
             task_id="Derivative_t",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -305,7 +292,7 @@ class Derivative2Task(PhysicsTask):
     Task for 2nd derivative learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -315,8 +302,7 @@ class Derivative2Task(PhysicsTask):
         super().__init__(
             task_id="Derivative2",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -327,7 +313,7 @@ class SpatialDerivative2Task(PhysicsTask):
     Task for 2nd spatial derivative learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -337,8 +323,7 @@ class SpatialDerivative2Task(PhysicsTask):
         super().__init__(
             task_id="Derivative2_x",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -349,7 +334,7 @@ class TemporalDerivative2Task(PhysicsTask):
     Task for 2nd temporal derivative learning.
     """
 
-    def __init__(self, weight: float = None, device: str = "cpu"):
+    def __init__(self, weight: float = None):
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
@@ -359,8 +344,7 @@ class TemporalDerivative2Task(PhysicsTask):
         super().__init__(
             task_id="Derivative2_t",
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -374,8 +358,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
     def __init__(self, 
             parameters: dict,
             velocity: Callable,
-            weight: float = None, 
-            device: str = "cpu"
+            weight: float = None
     ):
         self.parameters = parameters
         self.velocity = velocity
@@ -414,8 +397,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             parameters=parameters,
             lhs=lhs,
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
@@ -426,7 +408,7 @@ class StationaryAllenCahnTask(PhysicsTask):
     Task for the stationary Allen-Cahn governing equation.
     """
 
-    def __init__(self, parameters: dict, weight: float = None, device: str = "cpu"):
+    def __init__(self, parameters: dict, weight: float = None):
 
         def lhs(
                 u: torch.Tensor,
@@ -453,8 +435,7 @@ class StationaryAllenCahnTask(PhysicsTask):
             parameters=parameters,
             lhs=lhs,
             loss=loss,
-            weight=weight,
-            device=device
+            weight=weight
         )
     
     def loss_required_labels(self) -> List[str]:
