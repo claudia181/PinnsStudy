@@ -24,7 +24,7 @@ import shutil
 from model import Pinn
 from data_utils import extract_boundary, extract_interior, get_iterators
 from load_store_utils import resume_model, save_model
-from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, NeumannBCTask, DirichletBCTask
+from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, NeumannBCTask, DirichletBCTask, ICTask
 from phy_sys_dataset import PhySysDataset
 
 from typing import List
@@ -45,7 +45,6 @@ def train(
         recall_datas: List[PhySysDataset],
         recall_weights: List[float] | List[List[float]],
 
-        val_tasks: List[PhysicsTask],
         val_datas: List[PhySysDataset],
 
         monitoring_tasks: List[PhysicsTask],
@@ -92,7 +91,6 @@ def train(
         conflict_reference_task = conflict_reference_task_idx
     )
     model.device = device
-
     # ************************************** Define the objective function to run **************************************
     def objective(trial):
         # Sample hyperparameters
@@ -170,6 +168,9 @@ def train(
                 moving_avg_frequency = dwa_moving_avg_frequency,
                 dwa_warm_up = dwa_warm_up
             )
+
+        # Prepare the tasks
+        val_tasks = [task.copy() for task in new_tasks]
         
         for i, weight in enumerate(new_weights):
             if type(weight) is list:
@@ -515,6 +516,14 @@ def train(
             os.rename(old_filename, new_filename)
             print(f"{old_name} --> {new_name}: objective value = {trial.value:.4f}")
 
+def help():
+    print("--epochs: Number of epochs.")
+    print("--train_data: Training dataset filepath.")
+    print("--val_data: Validation dataset filepath.")
+    print("--fixed_params: Dictionary file (.pt or .pth) containing the fixed parameters of the physical system.")
+    print("--destination: Destination filepath of the experiment.")
+    print("--device: The device.")
+
 
 def train_full():
     parser = argparse.ArgumentParser()
@@ -535,18 +544,20 @@ def train_full():
     boundary = [extract_boundary(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
     interior = [extract_interior(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
 
-    if args.fixed_params != "":
-        param_dict = torch.load(args.fixed_params)
-    else:
-        param_dict = {}
+    fixed_params = {}
+
+    def v(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return torch.zeros_like(t)
 
     train_tasks = [
         AdvectionReactionDiffusionTask(
-            parameters=param_dict,
-            velocity=
-            weight=
-        )
+            parameters=fixed_params,
+            velocity=v
+        ),
+        NeumannBCTask(),
+        ICTask()
     ]
+    weights = [1.0 for _ in train_tasks]
     
     model = Pinn(
         device = args.device,#TODO
@@ -569,16 +580,15 @@ def train_full():
 
         ewc = False,
 
-        new_tasks =
-        new_datas =
-        new_weights =
+        new_tasks = train_tasks,
+        new_datas = trajectory,
+        new_weights = weights
 
-        recall_tasks =
-        recall_datas =
-        recall_weights =
+        #recall_tasks =
+        #recall_datas =
+        #recall_weights =
 
-        val_tasks =
-        val_datas =
+        val_datas = 
 
         monitoring_tasks =
         monitoring_datas =

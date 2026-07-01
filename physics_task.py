@@ -33,7 +33,7 @@ import torch
 from advection_reaction_diffusion import AdvectionReactionDiffusion
 from allen_cahn import AllenCahn
 from model import Pinn
-from typing import List
+from typing import List, Self
 
 # ===================================== PhysicsTask class =====================================
 class PhysicsTask:
@@ -124,6 +124,15 @@ class PhysicsTask:
         List[str]
         """
         return []
+    
+    def copy(self) -> Self:
+        return PhysicsTask(
+            task_id = self.id,
+            parameters = self.parameters,
+            lhs = self._lhs,
+            loss = self.loss,
+            weight = self.weight
+        )
 
 
 class NeumannBCTask(PhysicsTask):
@@ -151,6 +160,9 @@ class NeumannBCTask(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["du", "n"]
+    
+    def copy(self) -> Self:
+        return NeumannBCTask(weight=self.weight)
 
 class DirichletBCTask(PhysicsTask):
     """
@@ -176,14 +188,15 @@ class DirichletBCTask(PhysicsTask):
     def loss_required_labels(self) -> List[str]:
         return ["u"]
     
+    def copy(self) -> Self:
+        return DirichletBCTask(weight=self.weight)
+    
 class ICTask(PhysicsTask):
     """
     Task for initial condiitons.
     """
 
-    def __init__(self, indexes: List[int] = [], weight: float = None):
-
-        self.indexes = indexes
+    def __init__(self, weight: float = None):
 
         def lhs(u: torch.Tensor) -> torch.Tensor:
             return u
@@ -202,6 +215,9 @@ class ICTask(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["u"]
+    
+    def copy(self) -> Self:
+        return ICTask(weight=self.weight)
     
 class OutputTask(PhysicsTask):
     """
@@ -224,6 +240,9 @@ class OutputTask(PhysicsTask):
     def loss_required_labels(self) -> List[str]:
         return ["u"]
     
+    def copy(self) -> Self:
+        return OutputTask(weight=self.weight)
+    
 class DerivativeTask(PhysicsTask):
     """
     Task for 1st derivative learning.
@@ -244,6 +263,9 @@ class DerivativeTask(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["du"]
+    
+    def copy(self) -> Self:
+        return DerivativeTask(weight=self.weight)
     
 class SpatialDerivativeTask(PhysicsTask):
     """
@@ -266,6 +288,9 @@ class SpatialDerivativeTask(PhysicsTask):
     def loss_required_labels(self) -> List[str]:
         return ["du"]
     
+    def copy(self) -> Self:
+        return SpatialDerivativeTask(weight=self.weight)
+    
 class TemporalDerivativeTask(PhysicsTask):
     """
     Task for 1st tempporal derivative learning.
@@ -286,6 +311,9 @@ class TemporalDerivativeTask(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["du"]
+    
+    def copy(self) -> Self:
+        return TemporalDerivativeTask(weight=self.weight)
 
 class Derivative2Task(PhysicsTask):
     """
@@ -307,6 +335,9 @@ class Derivative2Task(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["d2u"]
+    
+    def copy(self) -> Self:
+        return Derivative2Task(weight=self.weight)
 
 class SpatialDerivative2Task(PhysicsTask):
     """
@@ -328,6 +359,9 @@ class SpatialDerivative2Task(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["d2u"]
+    
+    def copy(self) -> Self:
+        return SpatialDerivative2Task(weight=self.weight)
 
 class TemporalDerivative2Task(PhysicsTask):
     """
@@ -349,6 +383,9 @@ class TemporalDerivative2Task(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return ["d2u"]
+    
+    def copy(self) -> Self:
+        return TemporalDerivative2Task(weight=self.weight)
 
 class AdvectionReactionDiffusionTask(PhysicsTask):
     """
@@ -403,6 +440,13 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
     def loss_required_labels(self) -> List[str]:
         return []
 
+    def copy(self) -> Self:
+        return AdvectionReactionDiffusionTask(
+            parameters = self.parameters,
+            velocity = self.velocity,
+            weight = self.weight
+        )
+
 class StationaryAllenCahnTask(PhysicsTask):
     """
     Task for the stationary Allen-Cahn governing equation.
@@ -440,3 +484,9 @@ class StationaryAllenCahnTask(PhysicsTask):
     
     def loss_required_labels(self) -> List[str]:
         return []
+    
+    def copy(self) -> Self:
+        return StationaryAllenCahnTask(
+            parameters = self.parameters,
+            weight = self.weight
+        )

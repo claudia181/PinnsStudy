@@ -161,6 +161,24 @@ class PhySysDataset(Dataset):
             raise ValueError(f"Items of column {key} have {len(self.cols[key][0])} elements each, but {len(subkeys)} subkeys are passed.")
         self.subkeys[key] = subkeys
     
+    def index(self, key: str, subkey: str) -> int:
+        """
+        Parameters
+        ----------
+        key : str
+            The column key.
+        subkey : str
+            The column subkey.
+        Returns
+        -------
+        int
+            The index of the column subkey.
+        """
+        for i, sk in enumerate(self.subkeys[key]):
+            if sk == subkey:
+                return i
+        raise ValueError(f"{subkey} not in column {key}.")
+    
     def subsample(self, indices: torch.Tensor) -> Self:
         """
         Parameters

@@ -162,6 +162,77 @@ def extract_Dataset(
         new_ds.set_subkeys(key, datasets[0].subkeys[key])
     return new_ds
 
+def filter_points(
+        dataset: PhySysDataset, 
+        ranges: dict|List[dict], 
+        mode: str,
+        shape: str = "rectangle",
+    ) -> PhySysDataset:
+    """
+    Filter columns keeping elements within ranges and return the relative dataset.
+
+    Parameters
+    ----------
+    columns : PhySysDataset
+    ranges : dict|List[dict]
+    mode : str
+        Closed or open.
+    shape : str
+        "rectangle"|"circle", default = "rectangle";
+
+        if "rectangle", each key in spatial_ranges is a model a side;
+
+        if "circle", entry of key "r" is the radius and the other keys encode the center coordinates.
+
+    Returns
+    -------
+    PhySysDataset
+        The filtered dataset.
+    """
+    if type(ranges) is dict:
+        ranges = [ranges]
+    masks = []
+    for subset in ranges:
+        mask = torch.ones(dataset.length, dtype=bool)
+        if shape == "rectangle":
+            for key in subset.keys():
+                xmin = subset[key][0]
+                xmax = subset[key][1]
+                x = dataset.cols["spacetime"][:, dataset.index(key="spacetime", subkey=key)]
+                if mode == "closed":
+                    mask = mask & (x >= xmin) & (x <= xmax)
+                elif mode == "open":
+                    mask = mask & (x > xmin) & (x < xmax)
+                else:
+                    raise ValueError(f"Unrecognized mode {mode}.")
+        elif shape == "circle":
+            center_coords = [subset[key] for key in subset.keys() if key != "r"]
+            coords_indexes = [dataset.index(key) for key in subset.keys() if key != "r"]
+            rmin = subset["r"][0]
+            rmax = subset["r"][1]
+            center = torch.tensor(center_coords)
+            x = dataset.cols["spacetime"][:, coords_indexes]
+            if mode == "closed":
+                mask = mask & (torch.linalg.norm(x - center, axis=1) >= rmin) & (torch.linalg.norm(x - center, axis=1) <= rmax)
+            elif mode == "open":
+                mask = mask & (torch.linalg.norm(x - center, axis=1) > rmin) & (torch.linalg.norm(x - center, axis=1) < rmax)
+            else:
+                raise ValueError(f"Unrecognized mode {mode}.")
+        else:
+            raise ValueError(f"Unrecognized shape {shape}.")
+        masks.append(mask)  
+    mask = masks[0]
+    for m in masks[1:]:
+        mask = mask | m
+    
+    cols = {}
+    for key in dataset.cols.keys():
+        cols[key] = dataset.cols["key"][mask]
+
+    filtered_dataset = PhySysDataset(cols=cols)
+    filtered_dataset.subkeys = dataset.subkeys
+    return filtered_dataset
+
 def merge(datasets: List[PhySysDataset]) -> PhySysDataset:
     merged_ds = datasets[0].copy()
     for ds in datasets[1:]:
@@ -260,6 +331,126 @@ def extract_boundary(
         boundary_ds.set_subkeys(k, subkeys[k])
     return boundary_ds
 
+def boundary(
+    dataset: PhySysDataset, 
+    shape: str = "rectangle",
+    cell_size: float = 0.0,
+    center: list = [0.0, 0.0],
+    radius: float = 1.0,
+    insert_out_normal = True
+) -> PhySysDataset:
+    """
+    Extract the boundary points from the dataset for a given time instant.
+
+    Parameters
+    ----------
+    dataset : ConcatDataset|PhySysDataset
+    shape : str
+        "rectangle" | "circle".
+    cell_size : float
+    t : int
+        Time index.
+
+    Returns
+    -------
+    PhySysDataset
+        The PhySysDataset containing the boundary points at t.
+    """
+    spatial_keys = [key for key in dataset.subkeys["spacetime"] if key != "t"]
+    if shape == "rectangle":
+        boundary = {}
+        side = {}
+        for key in spatial_keys:
+            x = dataset.cols["spacetime"][:, dataset.index("spacetime", key)]
+            side[key] = [x.min(), x.max()]
+            # boundary = [
+            #     {"x": [xmin, xmin], "y": [ymin, ymax], "z": [zmin, zmax]},
+            #     {"x": [xmax, xmax], "y": [ymin, ymax], "z": [zmin, zmax]},
+            #     {"x": [xmin, xmax], "y": [ymin, ymin], "z": [zmin, zmax]},
+            #     {"x": [xmin, xmax], "y": [ymax, ymax], "z": [zmin, zmax]}
+            # ]
+        boundary = [side for _ in side.keys()]
+
+        if insert_out_normal:
+            if len(boundary) == 1:
+                outward_normal_vectors = [-1., 1.]
+            elif len(boundary) == 2:
+                outward_normal_vectors = [[-1., 0.], [1., 0.], [0., -1.], [0., 1.]]
+            elif len(boundary) == 3:
+                outward_normal_vectors = [[-1., 0., 0.], [1., 0., 0.], [0., -1., 0.], [0., 1., 0.], [0., 0., -1.], [0., 0., 1.]]
+
+        filtered_ds = filter_points(dataset=dataset, ranges=boundary[0], mode="closed", shape=shape)
+        for r in boundary[1:]:
+            filtered_ds.merge(filter_points(dataset=dataset, ranges=r, mode="closed", shape=shape))
+
+        if insert_out_normal:
+            n_col = torch.tensor(outward_normal_vectors[0]).repeat(filtered_ds.length, 1)
+            for n in outward_normal_vectors[1:]:
+                n_col = torch.cat(n_col, torch.tensor(n).repeat(filtered_ds.length, 1))
+            filtered_ds.add_column(key="n", col=n_col, subkeys=spatial_keys)
+
+    elif shape == "circle":
+        for key in spatial_keys:
+            boundary[key] = center[dataset.index("spacetime", key)]
+        boundary["r"] = [radius-0.5*cell_size, radius+0.5*cell_size] # [radius-cell_size, radius]
+        # boundary = {
+        #   "x": center[ix], 
+        #   "y": center[iy], 
+        #   "z": center[iz], 
+        #   "r": [radius-0.5*cell_size, radius+0.5*cell_size]
+        # }
+        filtered_ds = filter_points(dataset=dataset, ranges=boundary, mode="closed", shape=shape)
+        if insert_out_normal:
+            center = torch.tensor(center).repeat(filtered_ds.length, 1)
+            spatial_indexes = [dataset.index("spacetime", key) for key in spatial_keys]
+            out_vect = filtered_ds.cols["spacetime"][:, spatial_indexes] - center
+            outward_normal_vectors = out_vect / torch.linalg.norm(out_vect, dim=1, keepdim=True)
+            filtered_ds.add_column("n", outward_normal_vectors, spatial_keys, spatial_keys)
+    else:
+        raise ValueError(f"Unrecognized {shape} boundary shape.")
+    
+    return filtered_ds
+
+def interior(
+        dataset: PhySysDataset, 
+        shape: str = "rectangle",
+        cell_size: float = 0.0,
+        center: list = [0.0, 0.0],
+        radius: float = 1.0
+    ) -> PhySysDataset:
+    """
+    Extract the interior points from the dataset for a given time instant.
+
+    Parameters
+    ----------
+    dataset : ConcatDataset|PhySysDataset
+    t : int
+        Time index.
+    shape : str
+        "rectangle" | "circle".
+    cell_size : float
+
+    Returns
+    -------
+    PhySysDataset
+        The PhySysDataset containing the interior points at t.
+    """
+    spatial_keys = [key for key in dataset.subkeys["spacetime"] if key != "t"]
+    ranges = {}
+    if shape == "rectangle":
+        for key in spatial_keys:
+            x = dataset.cols["spacetime"][:, dataset.index("spacetime", key)]
+            ranges[key] = [x.min(), x.max()]
+        # ranges = {"x": [xmin, xmax], "y": [ymin, ymax]}
+    elif shape == "circle":
+        for key in spatial_keys:
+            ranges[key] = center[dataset.index("spacetime", key)]
+        ranges["r"] = [-1.0, radius-0.5*cell_size]
+        # ranges = {"x": center[0], "y": center[1], "r": [-1.0, radius-0.5*cell_size]}
+    else:
+        raise ValueError(f"Unrecognized {shape} boundary shape.")
+    return filter_points(dataset=dataset, ranges=ranges, mode="open", shape=shape)
+
 def extract_interior(
         dataset: PhySysDataset, 
         shape: str = "rectangle",
@@ -347,6 +538,23 @@ def subsample(
     indices = indices[:n_samples]
     return dataset.subsample(indices)
 
+def split(
+    dataset: PhySysDataset,
+    n_samples: List[int],
+    seed: int = 42
+) -> PhySysDataset:
+    torch.manual_seed(seed)
+    permutation = torch.randperm(len(dataset))
+    split = []
+    count = 0
+    for n in n_samples:
+        indices = permutation[count:count+n]
+        split.append(dataset.subsample(indices))
+        count += n
+        if count > len(dataset):
+            raise ValueError(f"The total number of samples ({sum(n_samples)}) required exceeds the dataset size ({len(dataset)}).")
+    return split
+
 def subsample_normal(dataset: PhySysDataset, mean: torch.Tensor, stddev: float, n_samples: int) -> PhySysDataset:
     d = len(mean) # d <= dim(spacetime)
     X = dataset.cols["spacetime"][:, :d]
@@ -359,7 +567,6 @@ def subsample_normal(dataset: PhySysDataset, mean: torch.Tensor, stddev: float, 
     indices = torch.multinomial(weights, n_samples, replacement=False)
 
     return dataset.subsample(indices)
-
 
 def get_grid(xmin_list: List[float], xmax_list: List[float], dx_list: List[float]) -> torch.Tensor:
     x_list = []
