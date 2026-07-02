@@ -551,6 +551,7 @@ class AdvectionReactionDiffusion:
             snapshots: set = None,
             n_snapshots: int = None,
             snapshot_start: float = 0.0,
+            all_snapshots: bool = False,
             vmin: float = None,
             vmax: float = None,
             cmap: str = "inferno",
@@ -668,7 +669,7 @@ class AdvectionReactionDiffusion:
             u[-1] = rho.value.copy()
             if self.shape == "rectangle":
                 viewer.plot()
-            if i % snapshot_frequency == 0 or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2):
+            if all_snapshots or i % snapshot_frequency == 0 or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2):
                 if t >= snapshot_start:
                     self.t.append(t)
                     self.u.append(u[-1])

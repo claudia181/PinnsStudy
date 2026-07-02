@@ -22,7 +22,7 @@ from optuna.trial import TrialState
 import shutil
 
 from model import Pinn
-from data_utils import extract_boundary, extract_interior, get_iterators
+from data_utils import get_boundary, get_interior, get_iterators
 from load_store_utils import resume_model, save_model
 from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, NeumannBCTask, DirichletBCTask, ICTask
 from phy_sys_dataset import PhySysDataset
@@ -540,9 +540,13 @@ def train_full():
     if args.epochs == -1:
         raise ValueError(f"Specify the number of epochs.")
     
-    trajectory = PhySysDataset.load(args.train_data).datasets
-    boundary = [extract_boundary(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
-    interior = [extract_interior(dataset=snapshot, shape="rectangle") for snapshot in trajectory]
+    train_trajectory = PhySysDataset.load(args.train_data).datasets
+    train_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
+    train_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
+
+    val_trajectory = PhySysDataset.load(args.val_data).datasets
+    val_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in val_trajectory]
+    val_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in val_trajectory]
 
     fixed_params = {}
 
@@ -582,7 +586,7 @@ def train_full():
 
         new_tasks = train_tasks,
         new_datas = trajectory,
-        new_weights = weights
+        new_weights = weights,
 
         #recall_tasks =
         #recall_datas =

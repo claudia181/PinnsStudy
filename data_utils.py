@@ -12,6 +12,7 @@ from typing import Tuple, List, Iterator
 from itertools import cycle
 import random
 from phy_sys_dataset import PhySysDataset
+import copy
 
 DIM_LABEL_DICT = {"x": 0, "y": 1, "r": 2}
 
@@ -207,7 +208,7 @@ def filter_points(
                     raise ValueError(f"Unrecognized mode {mode}.")
         elif shape == "circle":
             center_coords = [subset[key] for key in subset.keys() if key != "r"]
-            coords_indexes = [dataset.index(key) for key in subset.keys() if key != "r"]
+            coords_indexes = [dataset.index(key="spacetime", subkey=key) for key in subset.keys() if key != "r"]
             rmin = subset["r"][0]
             rmax = subset["r"][1]
             center = torch.tensor(center_coords)
@@ -227,7 +228,7 @@ def filter_points(
     
     cols = {}
     for key in dataset.cols.keys():
-        cols[key] = dataset.cols["key"][mask]
+        cols[key] = dataset.cols[key][mask]
 
     filtered_dataset = PhySysDataset(cols=cols)
     filtered_dataset.subkeys = dataset.subkeys
@@ -331,7 +332,7 @@ def extract_boundary(
         boundary_ds.set_subkeys(k, subkeys[k])
     return boundary_ds
 
-def boundary(
+def get_boundary(
     dataset: PhySysDataset, 
     shape: str = "rectangle",
     cell_size: float = 0.0,
@@ -357,36 +358,63 @@ def boundary(
         The PhySysDataset containing the boundary points at t.
     """
     spatial_keys = [key for key in dataset.subkeys["spacetime"] if key != "t"]
+    if len(spatial_keys) == 0:
+        raise ValueError(f"0-dimentional spatial domain.")
     if shape == "rectangle":
-        boundary = {}
-        side = {}
+        ranges = {}
         for key in spatial_keys:
             x = dataset.cols["spacetime"][:, dataset.index("spacetime", key)]
-            side[key] = [x.min(), x.max()]
+            ranges[key] = [x.min(), x.max()]
+        
+        boundary = []
+        outward_normal_vectors = []
+        for key in spatial_keys:
+            xmin = ranges[key][0]
+            side = copy.deepcopy(ranges)
+            side[key] = [xmin, xmin]
+            boundary.append(side)
+            if insert_out_normal:
+                if len(spatial_keys) == 1:
+                    outward_normal_vectors.append(-1.)
+                else:
+                    outward_normal_vector = [0. for _ in spatial_keys]
+                    outward_normal_vector[dataset.index("spacetime", key)] = -1.
+                    outward_normal_vectors.append(outward_normal_vector)
+
+            xmax = ranges[key][1]
+            side = copy.deepcopy(ranges)
+            side[key] = [xmax, xmax]
+            boundary.append(side)
+            if insert_out_normal:
+                if len(spatial_keys) == 1:
+                    outward_normal_vectors.append(1.)
+                else:
+                    outward_normal_vector = [0. for _ in spatial_keys]
+                    outward_normal_vector[dataset.index("spacetime", key)] = 1.
+                    outward_normal_vectors.append(outward_normal_vector)
+
             # boundary = [
             #     {"x": [xmin, xmin], "y": [ymin, ymax], "z": [zmin, zmax]},
             #     {"x": [xmax, xmax], "y": [ymin, ymax], "z": [zmin, zmax]},
             #     {"x": [xmin, xmax], "y": [ymin, ymin], "z": [zmin, zmax]},
             #     {"x": [xmin, xmax], "y": [ymax, ymax], "z": [zmin, zmax]}
             # ]
-        boundary = [side for _ in side.keys()]
 
-        if insert_out_normal:
-            if len(boundary) == 1:
-                outward_normal_vectors = [-1., 1.]
-            elif len(boundary) == 2:
-                outward_normal_vectors = [[-1., 0.], [1., 0.], [0., -1.], [0., 1.]]
-            elif len(boundary) == 3:
-                outward_normal_vectors = [[-1., 0., 0.], [1., 0., 0.], [0., -1., 0.], [0., 1., 0.], [0., 0., -1.], [0., 0., 1.]]
+            # outward_normal_vectors = [-1., 1.]
+            # outward_normal_vectors = [[-1., 0.], [1., 0.], [0., -1.], [0., 1.]]
+            # outward_normal_vectors = [[-1., 0., 0.], [1., 0., 0.], [0., -1., 0.], [0., 1., 0.], [0., 0., -1.], [0., 0., 1.]]
 
         filtered_ds = filter_points(dataset=dataset, ranges=boundary[0], mode="closed", shape=shape)
-        for r in boundary[1:]:
-            filtered_ds.merge(filter_points(dataset=dataset, ranges=r, mode="closed", shape=shape))
-
         if insert_out_normal:
             n_col = torch.tensor(outward_normal_vectors[0]).repeat(filtered_ds.length, 1)
-            for n in outward_normal_vectors[1:]:
-                n_col = torch.cat(n_col, torch.tensor(n).repeat(filtered_ds.length, 1))
+
+        for side, n in zip(boundary[1:], outward_normal_vectors):
+            side_ds = filter_points(dataset=dataset, ranges=side, mode="closed", shape=shape)
+            filtered_ds.merge(filter_points(dataset=dataset, ranges=side, mode="closed", shape=shape))
+            if insert_out_normal:
+                n_col = torch.cat((n_col, torch.tensor(n).repeat(side_ds.length, 1)))
+
+        if insert_out_normal:
             filtered_ds.add_column(key="n", col=n_col, subkeys=spatial_keys)
 
     elif shape == "circle":
@@ -411,7 +439,7 @@ def boundary(
     
     return filtered_ds
 
-def interior(
+def get_interior(
         dataset: PhySysDataset, 
         shape: str = "rectangle",
         cell_size: float = 0.0,
@@ -603,6 +631,10 @@ def get_circle(radius: float, dx_list: List[float]) -> torch.Tensor:
 
 def get_normal(n_samples: int, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
     return torch.normal(mean=mean.repeat(n_samples, 1), std=std.repeat(n_samples, 1))
+
+def get_uniform(n_samples: int, a: torch.Tensor, b: torch.Tensor, seed: int = 42) -> torch.Tensor:
+    torch.manual_seed(seed)
+    return torch.rand(n_samples, len(a)) * (b - a) + a
     
 def get_iterators(datas: List[PhySysDataset], batch_size: float, seed: int) -> Tuple[List[Iterator], int]:
     torch.manual_seed(seed)
