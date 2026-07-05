@@ -3,100 +3,28 @@ generate.py
 ===========
 
 This module implements data generation.
-
-Functions:
-- some functions used only inside this module.
-- generate: implements data generaition.
-- generate_from_config:
-    given a configuration file/dictionary, prepares the arguments for the generate function, 
-    call the generate, save the dataset, if required, and return the dataset.
 """
 
 import torch
 from torch.utils.data import ConcatDataset
 from phy_sys_dataset import PhySysDataset
 from typing import Callable, Set
-from allen_cahn import AllenCahn
-from advection_reaction_diffusion import AdvectionReactionDiffusion
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
 from phy_sys_dataset import PhySysDataset
-from data_utils import get_uniform
-from typing import Tuple
+from data_utils import get_uniform, get_grid
+from typing import Tuple, List
 
-def generate_AllenCahn(
-        X: torch.Tensor, 
-        lam: float, 
-        xi: list, 
-        include_lam: bool = False, 
-        include_xi: bool = False
-) -> PhySysDataset:
-    pde = AllenCahn(lam=lam, force_params=xi)
-    pde.set_spatial_points(x=X[:, 0], y=X[:, 1])
-    #points = torch.stack([pde.x, pde.y], dim=1)
-    pde.solve()
-
-    params = []
-    param_keys = []
-    if include_lam:
-        params.append(lam)
-        param_keys.append("lam")
-    if include_xi:
-        for i, item in enumerate(xi):
-            params.append(item)
-            param_keys.append(f"xi{i}")
-    if params != []:
-        params = torch.tensor(params).repeat(len(X), 1)
-
-        dataset = PhySysDataset(cols=[
-            ("spacetime", X),
-            ("u", pde.u),
-            ("du", pde.du),
-            ("d2u", pde.d2u),
-            ("param", params)
-        ])
-        dataset.set_subkeys("param", param_keys)
+def sample_points(mode: str, n_samples: int, ranges: List[Tuple[float]], steps: List[float] = None, seed: int = 42) -> torch.Tensor:
+    if mode == "uniform":
+        a = torch.tensor([r[0] for r in ranges])
+        b = torch.tensor([r[1] for r in ranges])
+        return get_uniform(n_samples=n_samples, a=a, b=b, seed=seed)
+    elif mode == "grid":
+        a = [r[0] for r in ranges]
+        b = [r[1] for r in ranges]
+        return get_grid(xmin_list=a, xmax_list=b, dx_list=steps)
     else:
-        dataset = PhySysDataset(cols=[
-            ("spacetime", X),
-            ("u", pde.u),
-            ("du", pde.du),
-            ("d2u", pde.d2u)
-        ])
-    dataset.set_subkeys("spacetime", ["x", "y"])
-    return dataset
-
-def generate_AllenCahn_unlabeled(
-        X: torch.Tensor, 
-        lam: float = None, 
-        xi: list = None, 
-        include_lam: bool = False, 
-        include_xi: bool = False
-) -> PhySysDataset:
-    params = []
-    param_keys = []
-    if include_lam:
-        if lam is None:
-            raise ValueError("Missing lambda parameter (lam = None).")
-        else:
-            params.append(lam)
-            param_keys.append("lam")
-    if include_xi:
-        if xi is None:
-            raise ValueError("Missing xi parameter (xi = None).")
-        else:
-            for i, item in enumerate(xi):
-                params.append(item)
-                param_keys.append(f"xi{i}")
-    if params == []:
-       dataset = PhySysDataset([("spacetime", X)])
-    else:
-        params = torch.tensor(params).repeat(len(X), 1)
-        dataset = PhySysDataset([
-            ("spacetime", X), 
-            ("param", params)
-        ])
-        dataset.set_subkeys("param", param_keys)
-    dataset.set_subkeys("spacetime", ["x", "y"])
-    return dataset
+        raise ValueError(f"Invalid mode '{mode}'. It must be in ['uniform', 'grid']")
 
 def help_rectangle() -> None:
     print("""
@@ -143,7 +71,7 @@ def help_ic() -> None:
 "min_noise": float, "max_noise": float
     """)
 
-def generate_AdvectionReactionDiffusion(
+def generate_AdvectionReactionDiffusion_snapshots(
         velocity: Callable,
         diffusion_coeff: float,
         source: Callable,
@@ -291,7 +219,6 @@ def generate_AdvectionReactionDiffusion(
 
     return ConcatDataset(datasets)
 
-# -------------------------------------------------------
 def generate_AdvectionReactionDiffusion(
         velocity: Callable,
         diffusion_coeff: float,
@@ -444,10 +371,10 @@ def generate_AdvectionReactionDiffusion(
             trajectory.merge(dataset)
 
     return trajectory
-# -------------------------------------------------------
 
 def generate_AdvectionReactionDiffusion_unlabeled(
         n_samples: int,
+        mode: str,
         x_range: Tuple[float],
         y_range: Tuple[float],
         t_range: Tuple[float],
@@ -467,12 +394,14 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         A: float = None, # if the source is implicit and you want to save its params values
         B: float = None, # if the source is implicit and you want to save its params values
 
-        include_bc: bool = False
+        include_bc: bool = False,
+        dx: float = None, dy: float = None, dt: float = None,
+        seed: int = 42
 ) -> PhySysDataset:
-    x = get_uniform(n_samples=n_samples, a=x_range[0], b=x_range[1])
-    y = get_uniform(n_samples=n_samples, a=y_range[0], b=y_range[1])
-    t = get_uniform(n_samples=n_samples, a=t_range[0], b=t_range[1])
-    X = torch.stack([x, y, t], dim=1)
+    X = sample_points(n_samples=n_samples, mode=mode, ranges=[x_range, y_range, t_range], steps=[dx, dy, dt], seed=seed)
+    x = X[:, 0]
+    y = X[:, 1]
+    t = X[:, 2]
     
     params = []
     param_keys = []
@@ -549,10 +478,11 @@ def generate_AdvectionReactionDiffusion_unlabeled(
     dataset.set_subkeys("spacetime", ["x", "y", "t"])
     return dataset
 
-# -----------------------------------------------
-
-def generate_AdvectionReactionDiffusion_unlabeled(
-        X: torch.Tensor, 
+def generate_AdvectionReactionDiffusion_unlabeled_snapshots(
+        n_samples: int,
+        mode: str,
+        x_range: Tuple[float],
+        y_range: Tuple[float],
         snapshots: Set[float],  
         
         velocity: Callable = None,
@@ -570,8 +500,12 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         A: float = None, # if the source is implicit and you want to save its params values
         B: float = None, # if the source is implicit and you want to save its params values
 
-        include_bc: bool = False
+        include_bc: bool = False,
+
+        dx: float = None, dy: float = None,
+        seed: int = 42
 ) -> ConcatDataset:
+    X = sample_points(n_samples=n_samples, mode=mode, ranges=[x_range, y_range], steps=[dx, dy], seed=seed)
     x = X[:, 0]
     y = X[:, 1]
     

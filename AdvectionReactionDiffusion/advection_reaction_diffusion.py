@@ -574,6 +574,8 @@ class AdvectionReactionDiffusion:
             Number of snapshots to store.
         snapshot_start : float
             When to start to store snapshots.
+        all_snapshots : bool
+            If True, a snapshot for each generation step is taken.
         vmin : float
             Minimum value for visualization.
         vmax : float

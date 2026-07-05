@@ -30,8 +30,8 @@ Moreover any physics task has associated the following attributes:
 
 from typing import Callable
 import torch
-from advection_reaction_diffusion import AdvectionReactionDiffusion
-from allen_cahn import AllenCahn
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
+from StationaryAllenCahn.allen_cahn import AllenCahn
 from model import Pinn
 from typing import List, Self
 
