@@ -2,7 +2,7 @@
 advection_reaction_diffusion.py
 ===========
 
-This module implements the logic for the ARD PDE class.
+This module implements the logic for the ARD system class.
 
 Spatio-temporal domain:
 - Time-dependent
@@ -13,11 +13,11 @@ Functions:
 - make_velocity: Returns a velocity function.
 
 Classes:
-- AdvectionReactionDiffusion: Implements the ARD PDE logic and methods required by the interface module pde_utils.py.
+- AdvectionReactionDiffusion: Implements the ARD system logic and methods.
 """
 
 import torch
-from fipy import CellVariable, Grid2D, Gmsh2D, TransientTerm, ConvectionTerm, ImplicitSourceTerm, DiffusionTerm, Viewer, FaceVariable
+from fipy import CellVariable, Grid2D, Gmsh2D, TransientTerm, ConvectionTerm, DiffusionTerm, Viewer, FaceVariable
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, Any, List, Tuple
@@ -33,33 +33,55 @@ def make_source(
         B: float = 0.0
         ) -> Callable[[np.ndarray, np.ndarray, float, np.ndarray], float]:
     """
-    Build a Gaussian source (real-valued) function.
+    Build a scalar source function s(x, y, t, u) with values in R.
 
-    Consider G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
+    Gaussian sources s(x, y, t) =
+        - amp * f(t) * G(x, y)
+        - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) )
+        - f(t) =
+            - 1 (constant)
+            - e^(- delta * t) (decay)
+            - sin((2 pi / period) * t) (oscillate)
+            - (t < period) (temporary)
+    Sources s(u) =
+        - A * u^2 - B * u (logistic)
+        - A * (u^3 - u) (AllenCahn)
+        - A * e^(- B / u) (Arrhenius)
 
     Parameters
     ----------
     mode : str
         Source function type identifier:
-        - constant: s(x, y) = amp * G(x, y)
-        - decay: s(x, y, t)  = amp * e^(-delta t) * G(x, y)
-        - oscillate: s(x, y, t)  = amp * sin((2 pi/period) t) * G(x, y)
-        - temporary: amp * G(x, y) * (t < period)
+        - "constant": s(x, y) = amp * G(x, y)
+        - "decay": s(x, y, t) = amp * e^(- delta * t) * G(x, y)
+        - "oscillate": s(x, y, t) = amp * sin((2 pi / period) * t) * G(x, y)
+        - "temporary": s(x, y, t) = amp * (t < period) * G(x, y)
+        - "logistic": s(u) = A * u^2 - B * u
+        - "AllenCahn": s(u) = A * (u^3 - u)
+        - "Arrhenius": s(u) = A * e^(- B / u)
     sigma : float
-        G parameter.
+        Standard deviation of the Gaussian.
     center : tuple
-        G parameter (xc, yc).
+        Center (xc, yc) of the Gaussian.
     amp : float
-        For Gaussian-type sources: amp * (G(x, y) * something).
+        For Gaussian-type sources: s(x, y, t) = amp * f(t) * G(x, y).
     delta : float
-        For mode = "decay", the decay rate: something = e^(- delta * t).
+        For mode = "decay", the decay rate: f(t) = e^(- delta * t).
     period : float
-        For mode = "oscillate": something = sin(2*pi/period * t).
+        - For mode = "oscillate": f(t) = sin(2 * pi / period * t).
+        - For mode = "temporary": f(t) = (t < period).
+    A : float
+        - For mode = "logistic": s(u) = A * u^2 - B * u
+        - For mode = "AllenCahn": s(u) = A * (u^3 - u)
+        - For mode = "Arrhenius": s(u) = A * e^(- B / u)
+    B : float
+        - For mode = "logistic": s(u) = A * u^2 - B * u
+        - For mode = "Arrhenius": s(u) = A * e^(- B / u)
 
     Returns
     -------
     Callable
-        A Gaussian/Logistic/Arrhenius source function s(x, y, t, u).
+        A source function s(x, y, t, u).
     """
     if sigma is None: sigma = 1.0
     if center is None: center = (0.0, 0.0)
@@ -115,19 +137,27 @@ def make_source(
             return A * np.exp(- B / u)
         
     else:
-        raise ValueError(f"Argument 'mode' must be 'constant'|'decay'|'oscillate'|'temporary', not {mode}.")
+        raise ValueError(f"Argument 'mode' must be 'constant'|'decay'|'oscillate'|'temporary'|'logistic'|'AllenCahn'|'Arrhenius', not {mode}.")
 
     return source
 
 def make_velocity(field: str = "rotation_expansion", **p: Any) -> Callable[[np.ndarray, np.ndarray, float], np.ndarray]:
     """
-    Build a (vector-valued) velocity function.
+    Build a velocity vector field.
 
-    v(x,y,t) = [v_x(x,y,t), v_y(x,y,t)],
-        - v_x(x,y,t) = -a(t)*y + b(t)*x
-        - v_y(x,y,t) = a(t)*x + b(t)*y
-        - a(t) = alpha | alpha * sin(omega_a*t) | alpha * e^(-gamma_a*t)
-        - b(t) = beta | beta * sin(omega_b*t) | beta * e^(-gamma_b*t)
+    v(x, y, t) = [v_x(x, y, t), v_y(x, y, t)],
+        - v_x(x, y, t) = - a(t) * y + b(t) * x
+        - v_y(x, y, t) = a(t) * x + b(t) * y
+        - a(t) = alpha * f_a(t)
+        - b(t) = beta * f_b(t)
+        - f_a(t) = 
+            - 1 (alpha_mode = "const")
+            - sin(omega_a * t) (alpha_mode = "sin")
+            - e^(- gamma_a * t) (alpha_mode = "exp")
+        - f_b(t) = 
+            - 1 (beta_mode = "const")
+            - sin(omega_b * t) (beta_mode = "sin")
+            - e^(- gamma_b * t) (beta_mode = "exp")
 
     Parameters
     ----------
@@ -139,10 +169,10 @@ def make_velocity(field: str = "rotation_expansion", **p: Any) -> Callable[[np.n
         - beta_mode : (str, default: "const") expansion mode in {"const", "sin", "exp"}
         - alpha : (float, default: 1.0) rotation weight
         - beta : (float, default: 0.0) radial expantion weight
-        - omega_a : (float, default: 1.0) rotation frequency (only if alpha_mode = "sin")
-        - omega_b : (float, default: 1.0) expansion frequency (only if beta_mode = "sin")
-        - gamma_a : (float, default: 0.5) rotation decay factor (alpha_mode = "exp")
-        - gamma_b : (float, default: 0.5) expansion decay factor (beta_mode = "exp").
+        - omega_a : (float, default: 1.0) rotation frequency (for alpha_mode = "sin")
+        - omega_b : (float, default: 1.0) expansion frequency (for beta_mode = "sin")
+        - gamma_a : (float, default: 0.5) rotation decay factor (for alpha_mode = "exp")
+        - gamma_b : (float, default: 0.5) expansion decay factor (for beta_mode = "exp").
     """
     def law(mode = None, a = None, omega = None, gamma = None):
         # mode: scheduling over time
@@ -187,18 +217,59 @@ def make_velocity(field: str = "rotation_expansion", **p: Any) -> Callable[[np.n
 
     raise ValueError(f"Unknown field '{field}'")
 
+def compute_d_dt(history: list, dt: float) -> float:
+    """
+    Approximates time derivative based on available history length.
+    u_history: list of arrays [u_{n-2}, u_{n-1}, u_n]
+    """
+    n = len(history)
 
-# ===================================== AdvectionReactionDiffusion equation class =====================================
+    if n < 2:
+        # At t0, derivative is zero (or unknown)
+        return np.zeros_like(history[-1])
+
+    elif n == 2:
+        # Step 1: 1st-order backward difference
+        return (history[1] - history[0]) / dt
+
+    else:
+        # Step 2+: 2nd-order 3-point BDF2 formula
+        return (3 * history[-1] - 4 * history[-2] + history[-3]) / (2 * dt)
+        
+def compute_d2_dt2(history: list, dt: float) -> float:
+    """
+    Approximates 2nd time derivative.
+    """
+    n = len(history)
+
+    if n < 3:
+        # Need at least 3 points to compute a second time derivative
+        return np.zeros_like(history[-1])
+
+    else:
+        # Standard 2nd-order central/backward 3-point stencil
+        return (history[-1] - 2 * history[-2] + history[-3]) / (dt**2)
+    
+def insert(buf: list, item: Any, capacity: int = 3) -> None:
+    """
+    Insert the new item in the FIFO limited capacity buffer.
+    """
+    if len(buf) >= capacity:
+        buf.pop(0)
+    buf.append(item)
+
+
+# ===================================== AdvectionReactionDiffusion class =====================================
 class AdvectionReactionDiffusion:
     """
-    Class representing an advection-reaction-diffusion PDE.
+    Class representing an advection-reaction-diffusion system.
 
     Attributes
     ----------
     v : Callable
-        Vector valued velocity function.
+        Velocity field function.
     s : Callable
-        Real valued source function.
+        Source field function.
     implicit_source : str
         Implicit source, i.e. use u, "logistic", "Arrhenius" or "AllenCahn".
     A : float
@@ -234,9 +305,9 @@ class AdvectionReactionDiffusion:
     d2u : list
         List of d2u values (one item per time instant).
     velocity : list
-        List of v values (one item per time instant).
+        Trajectory of the velocity vector field.
     source : list
-        List of s values (one item per time instant).
+        Trajectory of the source scalar field.
     boundary_mode : str
         Boundary mode for the circle.
     boundary_value :
@@ -263,9 +334,7 @@ class AdvectionReactionDiffusion:
             self,
             velocity: Callable = None,
             source: Callable = None,
-            implicit_source: Callable = None,#implicit_source: str = None,
-            #A: float = None,
-            #B: float = None,
+            implicit_source: Callable = None,
             diffusion_coeff: float = None
             ):
         """
@@ -274,27 +343,13 @@ class AdvectionReactionDiffusion:
         Parameters
         ----------
         velocity : Callable
-            Velocity function.
+            Velocity field.
         source : Callable
-            Source function.
-        implicit_source : str
-            Logistic, Arrhenius or AllenCahn.
-        A : float
-            Implicit source parameter.
-        B : float
-            Implicit source parameter.
-
-            - if implicit_source == "AllenCahn":\n
-                implicit_source_term = A * (u^3 - u)\n
-            - elif implicit_source == "logistic":\n
-                implicit_source_term = A * u^2 - B * u\n
-            - elif implicit_source == "Arrhenius":\n
-                implicit_source_term = A * np.exp(- B / u)\n
-            - else:\n
-                implicit_source_term = 0.0
-        
+            Source function defined on spatio-temporal coordinates.
+        implicit_source : Callable
+            Source function defined in terms of u.
         diffusion_coeff : float
-            The diffusion coefficient of the PDE (default: 0).
+            The diffusion coefficient (default: 0).
         """
 
         if velocity is None:
@@ -304,27 +359,10 @@ class AdvectionReactionDiffusion:
 
         if source is None:
             self.s = make_source(mode="constant", amp=0.0)
-            #self.implicit_source = False
         else:
             self.s = source
-            #self.implicit_source = implicit_source
-        
-        #if A is None:
-        #    A = 1.0
-        #if B is None:
-        #    B = 1.0
-
-        #if implicit_source is None:
-        #    implicit_source = ""
-        #    
-        #self.implicit_source = {
-        #    "name": implicit_source,
-        #    "A": A,
-        #    "B": B
-        #}
         if implicit_source is None:
             self.i_s = make_source(mode="constant", amp=0.0)
-            #self.implicit_source = False
         else:
             self.i_s = implicit_source
         
@@ -333,24 +371,38 @@ class AdvectionReactionDiffusion:
         else:
             self.D = diffusion_coeff
         
+        # Spatial grid
         self.x, self.y = None, None
         self.xmin, self.xmax = None, None
         self.ymin, self.ymax = None, None
         self.mesh = None
 
+        # Temporal grid
         self.t = None
+
+        # Initial state
         self.u0 = None
+
+        # Solution, 1st and 2nd derivative trajectories
         self.u, self.du, self.d2u = None, None, None
+
+        # Velocity vector field trajectory
         self.velocity = None
+
+        # Source trajectory
         self.source = None
+
+        # Rectangular domain: sides modes and values
         self.left_mode, self.left_value = None, None
         self.right_mode, self.right_value = None, None
         self.top_mode, self.top_value = None, None
         self.bottom_mode, self.bottom_value = None, None
 
+        # Circular domain: mode and value
         self.boundary_mode = None
         self.boundary_value = None
 
+        # Domain shape
         self.shape = None
     
     def set_spatial_points(self, 
@@ -363,7 +415,10 @@ class AdvectionReactionDiffusion:
             radius: float = None
         ) -> None:
         """
-        Set the spatial (2D) domain.
+        Set the spatial (2D) domain, filling
+        - self.x, self.y,
+        - self.x_faces, self.y_faces,
+        - self.xmax, self.ymax.
 
         Parameters
         ----------
@@ -387,22 +442,37 @@ class AdvectionReactionDiffusion:
         None
         """
         self.shape = mode
+
+        # RECTANGULAR GRID
         if mode == "rectangle":
+            # Minimum and maximum horizontal and vertical values (defining the xy plane)
             self.xmin, self.xmax = x_range
             self.ymin, self.ymax = y_range
 
+            # Number of horizontal and vertical cells
             nx = int(round((self.xmax - self.xmin) / dx))
             ny = int(round((self.ymax - self.ymin) / dy))
 
+            # Generate the rectangular mesh
             self.mesh = Grid2D(dx=dx, dy=dy, nx=nx, ny=ny)
+
+            # Store the coordinates of the centers of the cells 
+            # of the grid in self.x and self.y
+            # (cellCenters returns (2, n_cells))
             xc, yc = self.mesh.cellCenters
             self.x = xc + self.xmin
             self.y = yc + self.ymin
+
+            # Store the coordinates of the centers of the cells 
+            # of the grid boundary in self.x_faces and self.y_faces
+            # (faceCenters returns (2, n_cells))
             xf, yf = self.mesh.faceCenters
             self.x_faces = xf + self.xmin
             self.y_faces = yf + self.ymin
+
+        # CIRCULAR GRID
         elif mode == "circle":
-            # 1. Generate the unstructured circular mesh
+            # Generate circular mesh
             self.mesh = Gmsh2D(f'''
                 Point(1) = {{0, 0, 0, {cell_size}}};
                 Point(2) = {{{radius}, 0, 0, {cell_size}}};
@@ -417,19 +487,23 @@ class AdvectionReactionDiffusion:
                 Plane Surface(1) = {{1}};
             ''')
 
-            # 2. Update coordinate references
-            # cellCenters returns (2, n_cells)
+            # Store the coordinates of the centers 
+            # of the cells of the grid in self.x and self.y
+            # (cellCenters returns (2, n_cells))
             self.x, self.y = self.mesh.cellCenters
-            # faceCenters returns (2, n_faces)
+
+            # Store the coordinates of the centers 
+            # of the cells of the grid boundary in self.x_faces and self.y_faces
+            # (faceCenters returns (2, n_faces))
             self.x_faces, self.y_faces = self.mesh.faceCenters
 
-            # 3. Update domain bounds for the Viewer
+            # Update domain bounds for the Viewer
             self.xmin, self.xmax = -radius, radius
             self.ymin, self.ymax = -radius, radius
 
 
     def set_IC(
-            self, 
+            self,
             gaussian: bool, 
             periodic_circles: bool, 
             periodic_valleys: bool, 
@@ -451,47 +525,75 @@ class AdvectionReactionDiffusion:
 
         Parameters
         ----------
+        gaussian : bool
+            If True, a set of Gaussian bumps is added to the scalar field u0.
+            - amp * e^(-((x - xc)^2 + (y - yc)^2) / (2 * sigma^2)).
+        periodic_circles : bool
+            If True, a set of concentric circles is added to the scalar field u0.
+            - A * sin(B * sqrt(Cx * x^2 + Cy * y^2) + D).
+        periodic_valleys : bool
+            If True, a set of concentric valleys is added to the scalar field u0.
+            - A * sin(B * (x * y))
+        periodic_stripes : bool
+            If True, a set of stripes is added to the initial scalar field u0.
+            - A * sin(Bx * x + By * y)
+        periodic_grid : bool
+            If True, add sine waves along the x and y dimentions to the scalar field u0.
+            - Ax * sin(Bx * x^2 + Cx) + Ay * sin(By * y^2 + Cy)
+        uniform_noise : bool
+            If True, add uniform noise (between min_noise and max_noise) to the scalar field u0.
         u0 : np.ndarray
-            Initial values.
+            Initial scalar field.
         centers : list
-            Centers of the Gaussians.
+            Used if gaussian is True; centers of the Gaussians.
         amps : list
-            Amplitudes, one for each center, regulate the height of each Gaussian.
+            Used if gaussian is True; amplitudes, one for each center, regulate the height of each Gaussian.
         sigmas : list
-            Regulate the width of each Gaussian.
+            Used if gaussian is True; regulate the width of each Gaussian.
         
         Returns
         -------
         None
         """
+        # Base scalar field, which can be successively deformed by adding bumps, valleys
         if u0 is not None:
             self.u0 = u0 * np.ones_like(self.x)
         else:
             self.u0 = np.zeros_like(self.x)
 
+        # Adding gaussian bumps
         if gaussian:
             def normal(x0, y0, sigma = 0.1, amp = 1.0):
                 return amp * np.exp(-((self.x - x0)**2 + (self.y - y0)**2) / (2 * sigma**2))
 
-            if centers is None:
+            if centers is None or centers == []:
                 centers = []
                 amps = []
                 sigmas = []
             else:
-                if amps is None or amps == []: amps = [1.0 for _ in centers]
-                if sigmas is None or sigmas == []: sigmas = [0.1 for _ in centers]
+                if amps is None or amps == []:
+                    amps = [1.0 for _ in centers]
+                if sigmas is None or sigmas == []:
+                    sigmas = [0.1 for _ in centers]
 
             for center, amp, sigma in zip(centers, amps, sigmas):
                 self.u0 += normal(x0=center[0], y0=center[1], sigma=sigma, amp=amp)
         
+        # Adding concentric circles
         if periodic_circles:
             self.u0 += A * np.sin(B * np.sqrt(Cx * self.x**2 + Cy * self.y**2) + D) # concentric circles
         if periodic_valleys:
             self.u0 += A * np.sin(B * (self.x * self.y)) # circle^-1
+        
+        # Adding stripes
         if periodic_stripes:
             self.u0 += A * np.sin(Bx * self.x + By * self.y) # stripes
+        
+        # Adding grid pattern
         if periodic_grid:
             self.u0 += Ax * np.sin(Bx * self.x**2 + Cx) + Ay * np.sin(By * self.y**2 + Cy)
+
+        # Adding uniform noise
         if uniform_noise:
             self.u0 += np.random.uniform(low=min_noise * np.ones_like(self.u0), high=max_noise * np.ones_like(self.u0))
     
@@ -506,28 +608,30 @@ class AdvectionReactionDiffusion:
             ) -> None:
         """
         Set the boundary conditions (Neumann or Dirichlet).
-
         Default: Neumann with 0 value.
+        - For rectangular domains each side can have its own condition (Neumann or Dirichlet)
+        - For circular domains the BC is specified for all the entire circumference.
 
         Parameters
         ----------
         left : tuple
-            Left side BCs, [str mode, float value].
+            Used for rectangular spatial domains, left side BCs [str mode, float value].
         right : tuple
-            Right side BCs, [str mode, float value].
+            Used for rectangular spatial domains, right side BCs [str mode, float value].
         top : tuple
-            Top side BCs, [str mode, float value].
+            Used for rectangular spatial domains, top side BCs [str mode, float value].
         bottom : tuple
-            Bottom side BCs, [str mode, float value].
+            Used for rectangular spatial domains, bottom side BCs [str mode, float value].
         mode : str
-            Circumference BCs mode, "Neumann" | "Dirichlet".
+            Used for circular spatial domains, circumference BCs mode, "Neumann" | "Dirichlet".
         value : float
-            Circumference BCs value (out normal value or function value).
+            Used for circular spatial domains, circumference BCs value (out normal flux for Neumann or function value for Dirichlet).
         
         Returns
         -------
         None
         """
+        # Rectangular boundary
         if self.shape == "rectangle":
             self.left_mode, self.left_value = left
             self.right_mode, self.right_value = right
@@ -538,7 +642,8 @@ class AdvectionReactionDiffusion:
             for mode, side in zip(modes, sides):
                 if mode not in ["Neumann", "Dirichlet"]:
                     raise ValueError(f"Unrecognized {side} boundary mode '{mode}'.")
-                
+        
+        # Circular boundary
         elif self.shape == "circle":
             self.boundary_mode = mode
             self.boundary_value = value
@@ -558,7 +663,8 @@ class AdvectionReactionDiffusion:
             figsize: tuple = (3.5, 3.5)
             ) -> None:
         """
-        Solve the PDE on the domain points, updating the object state.
+        Solve the system on the domain points and produce a trajectory, updating the object state.
+        Finite differences numerical simulation with backward Euler time discretization.
 
         Parameters
         ----------
@@ -575,7 +681,7 @@ class AdvectionReactionDiffusion:
         snapshot_start : float
             When to start to store snapshots.
         all_snapshots : bool
-            If True, a snapshot for each generation step is taken.
+            If True, a snapshot for each step is taken.
         vmin : float
             Minimum value for visualization.
         vmax : float
@@ -589,33 +695,36 @@ class AdvectionReactionDiffusion:
         -------
         None
         """
-        #if self.implicit_source["name"] == "CahnHiliard":
-        #    rho = CellVariable(name="rho", mesh=self.mesh, hasOld=True)
-        #else:
-        rho = CellVariable(name="rho", mesh=self.mesh)  
-        mu = CellVariable(name="mu", mesh=self.mesh)
+        rho = CellVariable(name="rho", mesh=self.mesh)
 
-        rho.setValue(self.u0)  # initial density
+        # Set the initial field
+        rho.setValue(self.u0)
 
+        # Set the BCs (Neumann or Dirichlet)
+        # Rectangular domain
         if self.shape == "rectangle":
             modes = [self.left_mode, self.right_mode, self.top_mode, self.bottom_mode]
             values = [self.left_value, self.right_value, self.top_value, self.bottom_value]
             meshFaces = [self.mesh.facesLeft, self.mesh.facesRight, self.mesh.facesTop, self.mesh.facesBottom]
-
             for mode, value, meshFaces in zip(modes, values, meshFaces):
                 if mode == "Neumann":
                     rho.faceGrad.constrain(value, meshFaces)
                 elif mode == "Dirichlet":
                     rho.constrain(value, meshFaces)
+        # Circular domain
         elif self.shape == "circle":
             if self.boundary_mode == "Neumann":
                 rho.faceGrad.constrain(self.boundary_value, self.mesh.exteriorFaces)
             elif self.boundary_mode == "Dirichlet":
                 rho.constrain(self.boundary_value, self.mesh.exteriorFaces)
 
+        # Time instants to simulate
         times = np.arange(start=t0, stop=tN, step=dt)
+
+        # Time instants to store
         times2 = [t for t in times if t >= snapshot_start]
 
+        # Simulation visualization options
         if vmin is None or vmax is None:
             u0min = self.u0.min()
             u0max = self.u0.max()
@@ -626,27 +735,36 @@ class AdvectionReactionDiffusion:
             datamin = vmin
             datamax = vmax
         if self.shape == "rectangle":
-            #if self.implicit_source["name"] == "CahnHiliard":
-            #    viewer = Viewer(vars=mu, cmap=cmap, datamin=datamin, datamax=datamax)
-            #else:
             viewer = Viewer(vars=rho, cmap=cmap, datamin=datamin, datamax=datamax)
             fig = plt.gcf()
             fig.set_size_inches(figsize[0], figsize[1])
 
+        # Snapshots to store
         if snapshots is None:
             snapshots = []
 
+        # Number of snapshots to store
         if n_snapshots is None:
             n_snapshots = 1
 
+        # Set the snapshot frequency
         snapshot_frequency = max(int(round((len(times2) / n_snapshots))), 1)
     
-        u = [None, self.u0.copy(), self.u0.copy()]
+        # u buffer for the computation of du_dt with backward finite differences
+        u_history = []
+        # du_dx buffer for the computation of d2u_dxdt with backward finite differences
+        du_dx_history = []
+        # du_dy buffer for the computation of d2u_dydt with backward finite differences
+        du_dy_history = []
 
+        # Velocity field
         velocity = FaceVariable(mesh=self.mesh, rank=1)
+
+        # Source field
         source_term = CellVariable(mesh=self.mesh, rank=0)
         implicit_source_term = CellVariable(mesh=self.mesh, rank=0)
         
+        # Trajectory data containers
         self.u = []
         self.du = []
         self.d2u = []
@@ -654,79 +772,75 @@ class AdvectionReactionDiffusion:
         self.velocity = []
         self.source = []
 
+        # Run simulation
         for i, t in enumerate(times):
+            # Compute velocity field
             v = self.v(self.x_faces, self.y_faces, t)
+
+            # Compute source fields
             s = self.s(self.x, self.y, t, rho.value.copy())
             i_s = self.i_s(self.x, self.y, t, rho.value.copy())
 
+            # Update variables
             velocity.setValue(v)
             source_term.setValue(s)
             implicit_source_term.setValue(i_s)
-
-            #if self.implicit_source:
-            #    source_term = ImplicitSourceTerm(coeff=source)
-            #else:
-            #    source_term = source
             
-            u[-1] = rho.value.copy()
+            # Update u history
+            insert(buf=u_history, item=rho.value.copy())
+
+            # Simulation visualization
             if self.shape == "rectangle":
                 viewer.plot()
-            if all_snapshots or i % snapshot_frequency == 0 or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2):
-                if t >= snapshot_start:
-                    self.t.append(t)
-                    self.u.append(u[-1])
 
-                # Compute derivatives
-                du_dt = (u[-1] - u[-2]) / dt
-                du_dx = rho.grad[0, :].value
-                du_dy = rho.grad[1, :].value
+            # Compute 1st order derivatives
+            # Time derivative with backward finite differences
+            du_dt = compute_d_dt(history=u_history, dt=dt)
+            # Space derivatives from simulation variable attributes
+            du_dx = rho.grad[0].value
+            du_dy = rho.grad[1].value
+
+            # Update du_dx history
+            insert(buf=du_dx_history, item=du_dx)
+
+            # Update du_dy history
+            insert(buf=du_dy_history, item=du_dy)
+
+            # Compute 2nd order derivatives
+            # Time derivatives with backward finite differences
+            d2u_dtdt = compute_d2_dt2(history=u_history, dt=dt)
+            # Space derivatives from simulation variable attributes
+            d2u_dxdx = rho.grad[0].grad[0].value
+            d2u_dydy = rho.grad[1].grad[1].value
+            d2u_dxdy = rho.grad[0].grad[1].value
+            # Cross (space-time) derivatives
+            d2u_dxdt = compute_d_dt(history=du_dx_history, dt=dt)
+            d2u_dydt = compute_d_dt(history=du_dy_history, dt=dt)
+            
+            # Store simulation data (snapshots)
+            if all_snapshots or i % snapshot_frequency == 0 or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2) and t >= snapshot_start:
+                self.t.append(t)
+                self.u.append(u_history[-1])
+
+                # Create the gradient vector
                 du = np.stack([du_dx, du_dy, du_dt], axis=-1)  # (n_cells, 3)
 
-                if i > 1:
-                    d2u_dtdt = (u[-1] - 2 * u[-2] + u[-3]) / (dt**2)
-                else:
-                    d2u_dtdt = np.zeros_like(u[-1])
-
-                d2u_dxdx = rho.grad[0, :].faceGrad.divergence.value
-                d2u_dydy = rho.grad[1, :].faceGrad.divergence.value
-                d2u_dxdy = rho.grad[0, :].grad[1, :].value
-
-                if i > 0:
-                    d2u_dxdt = (du_dx - du_dx_pred) / dt
-                    d2u_dydt = (du_dy - du_dy_pred) / dt
-                else:
-                    d2u_dxdt = np.zeros_like(u[-1])
-                    d2u_dydt = np.zeros_like(u[-1])
-                
-                du_dx_pred, du_dy_pred = du_dx, du_dy
-
-                # assemble Hessian per cell
+                # Create the Hessian matrix
                 d2u = np.stack([
                     np.stack([d2u_dxdx, d2u_dxdy, d2u_dxdt], axis=-1),
                     np.stack([d2u_dxdy, d2u_dydy, d2u_dydt], axis=-1),
                     np.stack([d2u_dxdt, d2u_dydt, d2u_dtdt], axis=-1)
                 ], axis=-2)  # (n_cells, 3, 3)
 
-                if t >= snapshot_start:
-                    self.du.append(du)
-                    self.d2u.append(d2u)
-                    self.velocity.append(self.v(self.x, self.y, t))
-                    self.source.append(s)
-            
-            #if self.implicit_source["name"] == "AllenCahn":
-            #    implicit_source_term = self.implicit_source["A"] * (rho**2 - 1) * rho
-            #elif self.implicit_source["name"] == "logistic":
-            #    implicit_source_term = self.implicit_source["A"] * rho**2 - self.implicit_source["B"] * rho
-            #elif self.implicit_source["name"] == "Arrhenius":
-            #    implicit_source_term = self.implicit_source["A"] * np.exp(- self.implicit_source["B"] / rho)
-            #else:
-            #    implicit_source_term = 0.0
+                # Store simulation data
+                self.du.append(du)
+                self.d2u.append(d2u)
+                self.velocity.append(self.v(self.x, self.y, t))
+                self.source.append(s)
 
+            # Simulation step
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
-            eq.sweep(var=rho, dt=dt) # eq.solve(var=rho, dt=dt)
-        
-            u[-3] = u[-2]
-            u[-2] = u[-1]
+            eq.solve(var=rho, dt=dt)
 
     @classmethod
     def residual(
@@ -742,16 +856,16 @@ class AdvectionReactionDiffusion:
         B: float = 1.0
         ) -> torch.Tensor:
         """
-        Compute the residual.
+        Compute the residual for the governing equation of the system.
 
         Parameters
         ----------
         u : torch.Tensor
-            Function values.
+            u field.
         du : torch.Tensor
-            1st derivative values.
+            u gradient field.
         d2u : torch.Tensor
-            2nd derivative values.
+            u Hessian field.
         vx : torch.Tensor
             x-components of the velocity.
         vy : torch.Tensor
@@ -772,7 +886,7 @@ class AdvectionReactionDiffusion:
         elif implicit_source == "logistic":\n
             implicit_source_term = A * u^2 - B * u\n
         elif implicit_source == "Arrhenius":\n
-            implicit_source_term = A * np.exp(- B / u)\n
+            implicit_source_term = A * e^(- B / u)\n
         else:\n
             implicit_source_term = 0.0
 
@@ -803,7 +917,7 @@ class AdvectionReactionDiffusion:
         elif implicit_source == "logistic":
             implicit_source_term = A * u**2 - B * u
         elif implicit_source == "Arrhenius":
-            implicit_source_term = A * np.exp(- B / u)
+            implicit_source_term = A * torch.exp(- B / u)
         else:
             implicit_source_term = 0.0
         return dut + vx * dux + vy * duy + implicit_source_term - source_term - diffusion_term
