@@ -10,7 +10,7 @@ Spatio-temporal domain:
 
 Functions:
 - make_source: Returns a source function.
-- make_velocity: Returns a velocity function.
+- velocity_field: Returns a velocity function.
 
 Classes:
 - AdvectionReactionDiffusion: Implements the ARD system logic and methods.
@@ -95,8 +95,8 @@ def make_source(
     #if A is None: A = 1.0
     #if B is None: B = 1.0
 
-    def G(x, y):  # Gaussian spot
-        return np.exp(- ((x - xc)**2 + (y - yc)**2)/(2 * sigma**2))
+    def G(x, y): # Gaussian spot
+        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
 
     if mode == "constant":
 
@@ -109,7 +109,7 @@ def make_source(
             return amp * np.exp(- delta * t) * G(x, y)
         
     elif mode == "oscillate":
-        w = 2*np.pi/period
+        w = 2 * np.pi / period
 
         def source(x, y, t, u = None):
             return amp * np.sin(w * t) * G(x, y)
@@ -141,7 +141,222 @@ def make_source(
 
     return source
 
-def make_velocity(field: str = "rotation_expansion", **p: Any) -> Callable[[np.ndarray, np.ndarray, float], np.ndarray]:
+
+def constant_source(
+        sigma: float = 1.0,
+        center: tuple = (0.0, 0.0),
+        amp: float = 0.0
+        ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """
+    Returns a constant-in-time source function:
+    - s(x, y) = amp * G(x, y),
+    - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
+
+    Parameters
+    ----------
+    sigma : float
+        Standard deviation of the Gaussian.
+    center : tuple
+        Center (xc, yc) of the Gaussian.
+    amp : float
+        Constant multiplicative coefficient of the Gaussian.
+
+    Returns
+    -------
+    Callable
+        Constant-in-time source function s(x, y) = amp * G(x, y).
+    """
+    xc, yc = center
+
+    def G(x, y): # Gaussian spot
+        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
+    
+    def source(x, y):
+        return amp * G(x, y)
+    
+    return source
+
+def decaying_surce(
+        sigma: float = 1.0,
+        center: tuple = (0.0, 0.0),
+        amp: float = 0.0,
+        delta: float = 0.1
+        ) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
+    """
+    Returns an exponentially-decaying-in-time source function:
+    - s(x, y, t) = amp * e^(- delta * t) * G(x, y),
+    - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
+
+    Parameters
+    ----------
+    sigma : float
+        Standard deviation of the Gaussian.
+    center : tuple
+        Center (xc, yc) of the Gaussian.
+    amp : float
+        Constant multiplicative coefficient of the Gaussian.
+    delta : float
+        The decay rate: e^(- delta * t).
+    
+    Returns
+    -------
+    Callable
+        Exponentially-decaying-in-time source function s(x, y, t) = amp * e^(- delta * t) * G(x, y).
+    """
+    xc, yc = center
+    
+    def G(x, y): # Gaussian spot
+        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
+        
+    def source(x, y, t):
+        return amp * np.exp(- delta * t) * G(x, y)
+
+    return source
+
+def oscillating_source(
+        sigma: float = 1.0,
+        center: tuple = (0.0, 0.0),
+        amp: float = 0.0,
+        period: float = 5.0
+        ) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
+    """
+    Returns an oscillating-in-time source function:
+    - s(x, y, t) = amp * sin((2 * pi / period) * t) * G(x, y),
+    - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
+
+    Parameters
+    ----------
+    sigma : float
+        Standard deviation of the Gaussian.
+    center : tuple
+        Center (xc, yc) of the Gaussian.
+    amp : float
+        Constant multiplicative coefficient of the Gaussian.
+    period : float
+        - sin(2 * pi / period * t).
+
+    Returns
+    -------
+    Callable
+        Oscillating-in-time source s(x, y, t) = amp * sin((2 * pi / period) * t) * G(x, y).
+    """
+    xc, yc = center
+    
+    def G(x, y): # Gaussian spot
+        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
+        
+    w = 2 * np.pi / period
+    
+    def source(x, y, t):
+        return amp * np.sin(w * t) * G(x, y)
+
+    return source
+
+def temporary_source(
+        sigma: float = 1.0,
+        center: tuple = (0.0, 0.0),
+        amp: float = 0.0,
+        period: float = 5.0
+        ) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
+    """
+    Returns a limited-in-time (discontinuous-in-time) source function:
+        - s(x, y, t) = amp * (t < period) * G(x, y)
+        - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) )
+
+    Parameters
+    ----------
+    sigma : float
+        Standard deviation of the Gaussian.
+    center : tuple
+        Center (xc, yc) of the Gaussian.
+    amp : float
+        Constant multiplicative coefficient of the Gaussian.
+    period : float
+        Source limit time.
+
+    Returns
+    -------
+    Callable
+        Limited-in-time (discontinuous-in-time) source function s(x, y, t) = amp * (t < period) * G(x, y).
+    """
+    xc, yc = center
+        
+    def G(x, y): # Gaussian spot
+        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
+        
+    def source(x, y, t):
+        return amp * G(x, y) * (t < period)
+    
+    return source
+
+def logistic_source(
+        A: float = 0.0,
+        B: float = 0.0
+        ) -> Callable[[np.ndarray], float]:
+    """
+    Returns a logistic source function:
+        - s(u) = A * u^2 - B * u.
+
+    Parameters
+    ----------
+    A : float
+    B : float
+
+    Returns
+    -------
+    Callable
+        Source function s(u) = A * u^2 - B * u.
+    """
+    def source(u):
+        return A * u ** 2 - B * u
+
+    return source
+
+def allen_cahn_source(
+        A: float = 0.0
+        ) -> Callable[[np.ndarray], float]:
+    """
+    Returns an Allen-Cahn-type source function:
+        - s(u) = A * (u^3 - u)
+
+    Parameters
+    ----------
+    A : float
+
+    Returns
+    -------
+    Callable
+        Source function s(u) = A * (u^3 - u).
+    """
+    def source(u):
+        return A * (u ** 3 - u)
+
+    return source
+
+def arrhenius_source(
+        A: float = 0.0,
+        B: float = 0.0
+        ) -> Callable[[np.ndarray], float]:
+    """
+    Returns an Arrhenius-type source function:
+        - s(u) = A * e^(- B / u)
+
+    Parameters
+    ----------
+    A : float
+    B : float
+
+    Returns
+    -------
+    Callable
+        Source function s(u) = A * e^(- B / u).
+    """
+    def source(u = None):
+        return A * np.exp(- B / u)
+
+    return source
+
+def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.ndarray, np.ndarray, float], np.ndarray]:
     """
     Build a velocity vector field.
 
@@ -165,52 +380,66 @@ def make_velocity(field: str = "rotation_expansion", **p: Any) -> Callable[[np.n
         For now only "rotation_expansion" available.
     **p : Any
         Additional keyword arguments:
-        - alpha_mode : (str, default: "const") rotation mode in {"const", "sin", "exp"}
-        - beta_mode : (str, default: "const") expansion mode in {"const", "sin", "exp"}
-        - alpha : (float, default: 1.0) rotation weight
-        - beta : (float, default: 0.0) radial expantion weight
-        - omega_a : (float, default: 1.0) rotation frequency (for alpha_mode = "sin")
-        - omega_b : (float, default: 1.0) expansion frequency (for beta_mode = "sin")
-        - gamma_a : (float, default: 0.5) rotation decay factor (for alpha_mode = "exp")
-        - gamma_b : (float, default: 0.5) expansion decay factor (for beta_mode = "exp").
+        - rotation_mode : (str, default: "const") rotation mode in {"const", "sin", "exp"}
+        - radial_expansion_mode : (str, default: "const") expansion mode in {"const", "sin", "exp"}
+        - rotation_weight : (float, default: 1.0) rotation weight
+        - radial_expansion_weight : (float, default: 0.0) radial expantion weight
+        - rotation_frequency : (float, default: 1.0) rotation frequency (for alpha_mode = "sin")
+        - radial_expansion_frequency : (float, default: 1.0) expansion frequency (for beta_mode = "sin")
+        - rotation_decay_factor : (float, default: 0.5) rotation decay factor (for alpha_mode = "exp")
+        - radial_expansion_decay_factor : (float, default: 0.5) expansion decay factor (for beta_mode = "exp").
     """
-    def law(mode = None, a = None, omega = None, gamma = None):
-        # mode: scheduling over time
-        # a: weight
-        # omega: frequency (mode = "sin")
-        # gamma: decay factor (mode = "exp")
-        if a is None: a = 0.0
-        if omega is None: omega = 0.0
-        if gamma is None: gamma = 0.0
+    def law(mode, weight, frequency = None, decay_factor = None):
+        # mode: scheduling over time (const, sin, cos, exp)
+        # weight: multiplying coefficient
+        # frequency: for mode = "sin"
+        # decay_factor: for mode = "exp"
+        if weight is None: weight = 0.0
+        if frequency is None: frequency = 0.0
+        if decay_factor is None: decay_factor = 0.0
         if mode is None: mode = "const"
         if mode == "const":
-            f  = lambda t: a
+            f  = lambda t: weight
         elif mode == "sin":
-            f  = lambda t: a * np.sin(omega * t)
+            f  = lambda t: weight * np.sin(frequency * t)
         elif mode == "cos":
-            f  = lambda t: a * np.cos(omega * t)
+            f  = lambda t: weight * np.cos(frequency * t)
         elif mode == "exp":
-            f  = lambda t: a * np.exp(- gamma * t)
+            f  = lambda t: weight * np.exp(- decay_factor * t)
         else:
             raise ValueError(f"mode must be const|sin|exp, not {mode}.")
         return f
 
     if field == "rotation_expansion":
         # defaults
-        alpha = p.get("alpha", 1.0)                 # rotation weight
-        beta = p.get("beta", 0.0)                   # radial expansion weight
-        alpha_mode = p.get("alpha_mode", "const")   # rotation mode
-        beta_mode = p.get("beta_mode",  "const")    # expansion mode
-        omega_a = p.get("omega_a", 1.0)             # rotation frequency (rotation mode = "sin")
-        omega_b = p.get("omega_b", 1.0)             # expansion frequency (expansion mode = "sin")
-        gamma_a = p.get("gamma_a", 0.5)             # rotation decay factor (rotation mode = "exp")
-        gamma_b = p.get("gamma_b", 0.5)             # expansion decay factor (expansion mode = "exp")
+        rotation_weight = p.get("rotation_weight", 1.0)
+        radial_expansion_weight = p.get("radial_expansion_weight", 0.0)
+        rotation_mode = p.get("rotation_mode", "const")
+        radial_expansion_mode = p.get("radial_expansion_mode",  "const")
+        rotation_frequency = p.get("rotation_frequency", 1.0) # (rotation mode = "sin")
+        radial_expansion_frequency = p.get("radial_expansion_frequency", 1.0) # (expansion mode = "sin")
+        rotation_decay_factor = p.get("rotation_decay_factor", 1.0) # (rotation mode = "exp")
+        radial_expansion_decay_factor = p.get("radial_expansion_decay_factor", 1.0) # (expansion mode = "exp")
 
-        a = law(mode=alpha_mode, a=alpha, omega=omega_a, gamma=gamma_a) # rotation time law
-        b = law(mode=beta_mode, a=beta, omega=omega_b, gamma=gamma_b) # radial expantion time law
+        # rotation time law
+        a = law(
+                mode=rotation_mode,
+                weight=rotation_weight,
+                frequency=rotation_frequency,
+                decay_factor=rotation_decay_factor
+            )
+        
+        # radial expantion time law
+        b = law(
+                mode=radial_expansion_mode,
+                weight=radial_expansion_weight, 
+                frequency=radial_expansion_frequency, 
+                decay_factor=radial_expansion_decay_factor
+            )
 
         def v(x, y, t):
-            a_t = a(t); b_t = b(t)
+            a_t = a(t)
+            b_t = b(t)
             return np.array([- a_t * y + b_t * x, a_t * x + b_t * y])
 
         return v
@@ -353,16 +582,21 @@ class AdvectionReactionDiffusion:
         """
 
         if velocity is None:
-            self.v = make_velocity(alpha_mode="const", beta_mode="const", alpha=1.0, beta=0.0)
+            self.v = velocity_field(
+                rotation_mode="const", 
+                radial_expansion_mode="const", 
+                rotation_weight=1.0, 
+                radial_expansion_weight=0.0
+                )
         else:
             self.v = velocity
 
         if source is None:
-            self.s = make_source(mode="constant", amp=0.0)
+            self.s = constant_source()
         else:
             self.s = source
         if implicit_source is None:
-            self.i_s = make_source(mode="constant", amp=0.0)
+            self.i_s = constant_source()
         else:
             self.i_s = implicit_source
         
@@ -500,7 +734,6 @@ class AdvectionReactionDiffusion:
             # Update domain bounds for the Viewer
             self.xmin, self.xmax = -radius, radius
             self.ymin, self.ymax = -radius, radius
-
 
     def set_IC(
             self,

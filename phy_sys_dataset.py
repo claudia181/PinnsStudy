@@ -44,11 +44,11 @@ Class methods:
 
 import torch
 from torch.utils.data import Dataset
-from typing import List, Callable, Tuple, Self
+from typing import List, Callable, Tuple, Self, Dict
 
 class PhySysDataset(Dataset):
     # ------------ Subclassing methods ------------
-    def __init__(self, cols: List[Tuple[str, list|torch.Tensor]] | dict) -> None:
+    def __init__(self, cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor]) -> None:
         self.cols = {}
         if type(cols) is list:
             if cols == []:
@@ -279,3 +279,18 @@ class PhySysDataset(Dataset):
         for key in d["subkeys"]:
             dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
         return dataset
+
+    def size_gb(columns: List[str]) -> dict:
+        """
+        Parameters
+        ----------
+        columns : List[str]
+        """
+
+    def get_size_gb(tensor: torch.Tensor, ):
+        return tensor.element_size() * tensor.numel() / (1024 ** 3)
+
+    tensors = [x, y, z]
+
+total_bytes = sum(t.element_size() * t.numel() for t in tensors)
+print(f"{total_bytes / (1024**3):.3f} GB")
