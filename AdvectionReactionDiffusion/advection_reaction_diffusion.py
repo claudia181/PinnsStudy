@@ -21,6 +21,7 @@ from fipy import CellVariable, Grid2D, Gmsh2D, TransientTerm, ConvectionTerm, Di
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, Any, List, Tuple
+from derivatives_computation import derivative
     
 def make_source(
         sigma: float = 1.0,
@@ -446,48 +447,6 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
 
     raise ValueError(f"Unknown field '{field}'")
 
-def compute_d_dt(history: list, dt: float) -> float:
-    """
-    Approximates time derivative based on available history length.
-    u_history: list of arrays [u_{n-2}, u_{n-1}, u_n]
-    """
-    n = len(history)
-
-    if n < 2:
-        # At t0, derivative is zero (or unknown)
-        return np.zeros_like(history[-1])
-
-    elif n == 2:
-        # Step 1: 1st-order backward difference
-        return (history[1] - history[0]) / dt
-
-    else:
-        # Step 2+: 2nd-order 3-point BDF2 formula
-        return (3 * history[-1] - 4 * history[-2] + history[-3]) / (2 * dt)
-        
-def compute_d2_dt2(history: list, dt: float) -> float:
-    """
-    Approximates 2nd time derivative.
-    """
-    n = len(history)
-
-    if n < 3:
-        # Need at least 3 points to compute a second time derivative
-        return np.zeros_like(history[-1])
-
-    else:
-        # Standard 2nd-order central/backward 3-point stencil
-        return (history[-1] - 2 * history[-2] + history[-3]) / (dt**2)
-    
-def insert(buf: list, item: Any, capacity: int = 3) -> None:
-    """
-    Insert the new item in the FIFO limited capacity buffer.
-    """
-    if len(buf) >= capacity:
-        buf.pop(0)
-    buf.append(item)
-
-
 # ===================================== AdvectionReactionDiffusion class =====================================
 class AdvectionReactionDiffusion:
     """
@@ -610,6 +569,7 @@ class AdvectionReactionDiffusion:
         self.xmin, self.xmax = None, None
         self.ymin, self.ymax = None, None
         self.mesh = None
+        self.dx, self.dt = None, None
 
         # Temporal grid
         self.t = None
@@ -643,8 +603,7 @@ class AdvectionReactionDiffusion:
             mode: str, 
             x_range: tuple = None, 
             y_range: tuple = None, 
-            dx: float = None, 
-            dy: float = None,
+            dx: float = None,
             cell_size: float = None,
             radius: float = None
         ) -> None:
@@ -676,6 +635,7 @@ class AdvectionReactionDiffusion:
         None
         """
         self.shape = mode
+        self.dx = dx
 
         # RECTANGULAR GRID
         if mode == "rectangle":
@@ -685,10 +645,10 @@ class AdvectionReactionDiffusion:
 
             # Number of horizontal and vertical cells
             nx = int(round((self.xmax - self.xmin) / dx))
-            ny = int(round((self.ymax - self.ymin) / dy))
+            ny = int(round((self.ymax - self.ymin) / dx))
 
             # Generate the rectangular mesh
-            self.mesh = Grid2D(dx=dx, dy=dy, nx=nx, ny=ny)
+            self.mesh = Grid2D(dx=dx, dy=dx, nx=nx, ny=ny)
 
             # Store the coordinates of the centers of the cells 
             # of the grid in self.x and self.y
@@ -887,7 +847,6 @@ class AdvectionReactionDiffusion:
             tN: float = 0.0,
             dt: float = 1.0,
             snapshots: set = None,
-            n_snapshots: int = None,
             snapshot_start: float = 0.0,
             all_snapshots: bool = False,
             vmin: float = None,
@@ -952,10 +911,13 @@ class AdvectionReactionDiffusion:
                 rho.constrain(self.boundary_value, self.mesh.exteriorFaces)
 
         # Time instants to simulate
-        times = np.arange(start=t0, stop=tN, step=dt)
+        timeline = np.arange(start=t0, stop=tN, step=dt)
 
-        # Time instants to store
-        times2 = [t for t in times if t >= snapshot_start]
+        # Snapshots to store
+        if snapshots is None:
+            snapshots = [t for t in timeline if t >= snapshot_start]
+        else:
+            snapshots = [t for t in snapshots if t >= snapshot_start]
 
         # Simulation visualization options
         if vmin is None or vmax is None:
@@ -971,24 +933,6 @@ class AdvectionReactionDiffusion:
             viewer = Viewer(vars=rho, cmap=cmap, datamin=datamin, datamax=datamax)
             fig = plt.gcf()
             fig.set_size_inches(figsize[0], figsize[1])
-
-        # Snapshots to store
-        if snapshots is None:
-            snapshots = []
-
-        # Number of snapshots to store
-        if n_snapshots is None:
-            n_snapshots = 1
-
-        # Set the snapshot frequency
-        snapshot_frequency = max(int(round((len(times2) / n_snapshots))), 1)
-    
-        # u buffer for the computation of du_dt with backward finite differences
-        u_history = []
-        # du_dx buffer for the computation of d2u_dxdt with backward finite differences
-        du_dx_history = []
-        # du_dy buffer for the computation of d2u_dydt with backward finite differences
-        du_dy_history = []
 
         # Velocity field
         velocity = FaceVariable(mesh=self.mesh, rank=1)
@@ -1006,7 +950,7 @@ class AdvectionReactionDiffusion:
         self.source = []
 
         # Run simulation
-        for i, t in enumerate(times):
+        for i, t in enumerate(timeline):
             # Compute velocity field
             v = self.v(self.x_faces, self.y_faces, t)
 
@@ -1018,62 +962,37 @@ class AdvectionReactionDiffusion:
             velocity.setValue(v)
             source_term.setValue(s)
             implicit_source_term.setValue(i_s)
-            
-            # Update u history
-            insert(buf=u_history, item=rho.value.copy())
 
             # Simulation visualization
             if self.shape == "rectangle":
                 viewer.plot()
-
-            # Compute 1st order derivatives
-            # Time derivative with backward finite differences
-            du_dt = compute_d_dt(history=u_history, dt=dt)
-            # Space derivatives from simulation variable attributes
-            du_dx = rho.grad[0].value
-            du_dy = rho.grad[1].value
-
-            # Update du_dx history
-            insert(buf=du_dx_history, item=du_dx)
-
-            # Update du_dy history
-            insert(buf=du_dy_history, item=du_dy)
-
-            # Compute 2nd order derivatives
-            # Time derivatives with backward finite differences
-            d2u_dtdt = compute_d2_dt2(history=u_history, dt=dt)
-            # Space derivatives from simulation variable attributes
-            d2u_dxdx = rho.grad[0].grad[0].value
-            d2u_dydy = rho.grad[1].grad[1].value
-            d2u_dxdy = rho.grad[0].grad[1].value
-            # Cross (space-time) derivatives
-            d2u_dxdt = compute_d_dt(history=du_dx_history, dt=dt)
-            d2u_dydt = compute_d_dt(history=du_dy_history, dt=dt)
             
             # Store simulation data (snapshots)
-            if all_snapshots or i % snapshot_frequency == 0 or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2) and t >= snapshot_start:
+            if all_snapshots or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2) and t >= snapshot_start:
                 self.t.append(t)
-                self.u.append(u_history[-1])
+                self.u.append(rho.value.copy())
 
                 # Create the gradient vector
-                du = np.stack([du_dx, du_dy, du_dt], axis=-1)  # (n_cells, 3)
+                #du = np.stack([du_dx, du_dy, du_dt], axis=-1)  # (n_cells, 3)
 
                 # Create the Hessian matrix
-                d2u = np.stack([
-                    np.stack([d2u_dxdx, d2u_dxdy, d2u_dxdt], axis=-1),
-                    np.stack([d2u_dxdy, d2u_dydy, d2u_dydt], axis=-1),
-                    np.stack([d2u_dxdt, d2u_dydt, d2u_dtdt], axis=-1)
-                ], axis=-2)  # (n_cells, 3, 3)
+                #d2u = np.stack([
+                #    np.stack([d2u_dxdx, d2u_dxdy, d2u_dxdt], axis=-1),
+                #    np.stack([d2u_dxdy, d2u_dydy, d2u_dydt], axis=-1),
+                #    np.stack([d2u_dxdt, d2u_dydt, d2u_dtdt], axis=-1)
+                #], axis=-2)  # (n_cells, 3, 3)
 
                 # Store simulation data
-                self.du.append(du)
-                self.d2u.append(d2u)
                 self.velocity.append(self.v(self.x, self.y, t))
                 self.source.append(s)
 
             # Simulation step
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
             eq.solve(var=rho, dt=dt)
+
+        self.u = torch.stack([torch.from_numpy(u_snapshot) for u_snapshot in self.u])
+        self.du = derivative(f=self.u, dx=self.dx, dt=self.dt, order=1, method="central")
+        self.d2u = derivative(f=self.u, dx=self.dx, dt=self.dt, order=2, method="central")
 
     @classmethod
     def residual(
