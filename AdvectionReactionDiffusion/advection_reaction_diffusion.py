@@ -20,9 +20,10 @@ import torch
 from fipy import CellVariable, Grid2D, Gmsh2D, TransientTerm, ConvectionTerm, DiffusionTerm, Viewer, FaceVariable
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Callable, Any, List, Tuple
+from typing import Callable, Any, List, Tuple, Set
 from derivatives_computation import derivative
-    
+from trajectory import Trajectory
+
 def make_source(
         sigma: float = 1.0,
         center: tuple = (0.0, 0.0),
@@ -150,7 +151,7 @@ def constant_source(
         ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
     """
     Returns a constant-in-time source function:
-    - s(x, y) = amp * G(x, y),
+    - s(x, y, t, u) = amp * G(x, y),
     - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
 
     Parameters
@@ -172,7 +173,7 @@ def constant_source(
     def G(x, y): # Gaussian spot
         return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
     
-    def source(x, y):
+    def source(x, y, t):
         return amp * G(x, y)
     
     return source
@@ -569,22 +570,10 @@ class AdvectionReactionDiffusion:
         self.xmin, self.xmax = None, None
         self.ymin, self.ymax = None, None
         self.mesh = None
-        self.dx, self.dt = None, None
-
-        # Temporal grid
-        self.t = None
+        self.dx = None
 
         # Initial state
         self.u0 = None
-
-        # Solution, 1st and 2nd derivative trajectories
-        self.u, self.du, self.d2u = None, None, None
-
-        # Velocity vector field trajectory
-        self.velocity = None
-
-        # Source trajectory
-        self.source = None
 
         # Rectangular domain: sides modes and values
         self.left_mode, self.left_value = None, None
@@ -598,6 +587,9 @@ class AdvectionReactionDiffusion:
 
         # Domain shape
         self.shape = None
+
+        # Trajectory
+        self.trajectory = None
     
     def set_spatial_points(self, 
             mode: str, 
@@ -623,8 +615,6 @@ class AdvectionReactionDiffusion:
             [y_min, y_max].
         dx : float
             x-step.
-        dy : float
-            y-step.
         cell_size : float
             Cell size for the "circle" mode.
         radius : float
@@ -843,12 +833,12 @@ class AdvectionReactionDiffusion:
 
     def solve(
             self,
-            t0: float = 0.0,
-            tN: float = 0.0,
-            dt: float = 1.0,
-            snapshots: set = None,
-            snapshot_start: float = 0.0,
-            all_snapshots: bool = False,
+            t0: float,
+            tN: float,
+            dt: float,
+            n_samples: int,
+            seed: int,
+            snapshot_times: Set[float] = None,
             vmin: float = None,
             vmax: float = None,
             cmap: str = "inferno",
@@ -866,14 +856,8 @@ class AdvectionReactionDiffusion:
             Final time value.
         dt : float
             Time step.
-        snapshots : set
+        snapshot_times : set
             Set of time values on which to store the computed solution values.
-        n_snapshots : int
-            Number of snapshots to store.
-        snapshot_start : float
-            When to start to store snapshots.
-        all_snapshots : bool
-            If True, a snapshot for each step is taken.
         vmin : float
             Minimum value for visualization.
         vmax : float
@@ -914,10 +898,8 @@ class AdvectionReactionDiffusion:
         timeline = np.arange(start=t0, stop=tN, step=dt)
 
         # Snapshots to store
-        if snapshots is None:
-            snapshots = [t for t in timeline if t >= snapshot_start]
-        else:
-            snapshots = [t for t in snapshots if t >= snapshot_start]
+        if snapshot_times is None:
+            snapshot_times = []
 
         # Simulation visualization options
         if vmin is None or vmax is None:
@@ -940,59 +922,38 @@ class AdvectionReactionDiffusion:
         # Source field
         source_term = CellVariable(mesh=self.mesh, rank=0)
         implicit_source_term = CellVariable(mesh=self.mesh, rank=0)
-        
-        # Trajectory data containers
-        self.u = []
-        self.du = []
-        self.d2u = []
-        self.t = []
-        self.velocity = []
-        self.source = []
+
+        # Initialize a trajectory object
+        if self.shape == "rectangle":
+            self.trajectory = Trajectory(x_coords=self.x, y_coords=self.y, nt=len(timeline), dt=dt, n_samples=n_samples, snapshot_times=snapshot_times, shape=self.shape, nx=self.mesh.nx, ny=self.mesh.ny, dx=self.dx, seed=seed)
+        else:
+            self.trajectory = Trajectory(x_coords=self.x, y_coords=self.y, nt=len(timeline), dt=dt, n_samples=n_samples, snapshot_times=snapshot_times, shape=self.shape, seed=seed)
 
         # Run simulation
+        t_prev = timeline[0]
         for i, t in enumerate(timeline):
             # Compute velocity field
-            v = self.v(self.x_faces, self.y_faces, t)
+            v_value = self.v(self.x_faces, self.y_faces, t)
 
             # Compute source fields
-            s = self.s(self.x, self.y, t, rho.value.copy())
-            i_s = self.i_s(self.x, self.y, t, rho.value.copy())
+            s_value = self.s(self.x, self.y, t)
+            i_s_value = self.i_s(rho.value.copy())
 
             # Update variables
-            velocity.setValue(v)
-            source_term.setValue(s)
-            implicit_source_term.setValue(i_s)
+            velocity.setValue(v_value)
+            source_term.setValue(s_value)
+            implicit_source_term.setValue(i_s_value)
+
+            # Update the trajectory
+            self.trajectory.append(t=t, f_snapshot=rho.value.copy(), velocity_snapshot=self.v(self.x, self.y, t), source_snapshot=s_value)
 
             # Simulation visualization
             if self.shape == "rectangle":
                 viewer.plot()
-            
-            # Store simulation data (snapshots)
-            if all_snapshots or (snapshots != [] and abs(t - np.array(list(snapshots))).min() < 1e-2) and t >= snapshot_start:
-                self.t.append(t)
-                self.u.append(rho.value.copy())
-
-                # Create the gradient vector
-                #du = np.stack([du_dx, du_dy, du_dt], axis=-1)  # (n_cells, 3)
-
-                # Create the Hessian matrix
-                #d2u = np.stack([
-                #    np.stack([d2u_dxdx, d2u_dxdy, d2u_dxdt], axis=-1),
-                #    np.stack([d2u_dxdy, d2u_dydy, d2u_dydt], axis=-1),
-                #    np.stack([d2u_dxdt, d2u_dydt, d2u_dtdt], axis=-1)
-                #], axis=-2)  # (n_cells, 3, 3)
-
-                # Store simulation data
-                self.velocity.append(self.v(self.x, self.y, t))
-                self.source.append(s)
 
             # Simulation step
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
             eq.solve(var=rho, dt=dt)
-
-        self.u = torch.stack([torch.from_numpy(u_snapshot) for u_snapshot in self.u])
-        self.du = derivative(f=self.u, dx=self.dx, dt=self.dt, order=1, method="central")
-        self.d2u = derivative(f=self.u, dx=self.dx, dt=self.dt, order=2, method="central")
 
     @classmethod
     def residual(
@@ -1051,8 +1012,8 @@ class AdvectionReactionDiffusion:
         duy = du[:, 1]
         dut = du[:, 2]
 
-        uxx = d2u[:, 0, 0]
-        uyy = d2u[:, 1, 1]
+        uxx = d2u[:, 0] # d2u[:, 0, 0]
+        uyy = d2u[:, 1] # d2u[:, 1, 1]
         # utt = d2u[:, 2, 2]
 
         vx = v[:, 0]
@@ -1065,9 +1026,9 @@ class AdvectionReactionDiffusion:
         else:
             source_term = 0.0
         if implicit_source == "AllenCahn":
-            implicit_source_term = A * (u**3 - u)
+            implicit_source_term = A * (u ** 3 - u)
         elif implicit_source == "logistic":
-            implicit_source_term = A * u**2 - B * u
+            implicit_source_term = A * u ** 2 - B * u
         elif implicit_source == "Arrhenius":
             implicit_source_term = A * torch.exp(- B / u)
         else:

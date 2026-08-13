@@ -3,5 +3,6 @@ models/
 myenv/
 __pycache__/
 AllenCahn/
+AdvectionReactionDiffusion/temp/
 .vscode/
 .DS_Store

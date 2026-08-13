@@ -349,7 +349,7 @@ class SpatialDerivative2Task(PhysicsTask):
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
             d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
-            return mse_loss(d2u_pred[:, :2, :2], d2u[:, :2, :2])
+            return mse_loss(d2u_pred[:, :2], d2u[:, :2]) # mse_loss(d2u_pred[:, :2, :2], d2u[:, :2, :2])
         
         super().__init__(
             task_id="Derivative2_x",
@@ -373,7 +373,7 @@ class TemporalDerivative2Task(PhysicsTask):
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')
             d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
-            return mse_loss(d2u_pred[:, 2, 2], d2u[:, 2, 2])
+            return mse_loss(d2u_pred[:, 2], d2u[:, 2]) # mse_loss(d2u_pred[:, 2, 2], d2u[:, 2, 2])
         
         super().__init__(
             task_id="Derivative2_t",

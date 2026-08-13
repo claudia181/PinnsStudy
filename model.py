@@ -491,6 +491,13 @@ class Pinn(torch.nn.Module):
                 v = vmap(jacrev(self._forward_single, argnums=0), in_dims=(0, 0))(x, pde_params)[:, 0, :].squeeze() # shape (n, d)
             elif order == 2:
                 v = vmap(hessian(self._forward_single, argnums=0), in_dims=(0, 0))(x, pde_params)[:, 0, :, :].squeeze() # shape (n, d, d)
+                vxx = v[:, 0, 0]
+                vyy = v[:, 1, 1]
+                vtt = v[:, 2, 2]
+                vxy = v[:, 0, 1]
+                vxt = v[:, 0, 2]
+                vyt = v[:, 1, 2]
+                v = torch.stack([vxx, vyy, vtt, vxy, vxt, vyt], dim=1)
             elif order == 4:
                 f_4th = hessian(hessian(self._forward_single, argnums=0), argnums=0)
                 v = vmap(f_4th, in_dims=(0, 0))(x, pde_params)[:, 0, :, :, :, :].squeeze() # shape (n, d, d, d, d)

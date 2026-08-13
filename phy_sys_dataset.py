@@ -280,17 +280,16 @@ class PhySysDataset(Dataset):
             dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
         return dataset
 
-    def size_gb(columns: List[str]) -> dict:
+    def size_gb(self, col_ids: List[str] = None) -> float:
         """
         Parameters
         ----------
         columns : List[str]
         """
-
-    def get_size_gb(tensor: torch.Tensor, ):
-        return tensor.element_size() * tensor.numel() / (1024 ** 3)
-
-    tensors = [x, y, z]
-
-total_bytes = sum(t.element_size() * t.numel() for t in tensors)
-print(f"{total_bytes / (1024**3):.3f} GB")
+        total_bytes = 0.0
+        if col_ids is None:
+            col_ids = list(self.cols.keys())
+        for col_str in col_ids:
+            col = self.cols[col_str]
+            total_bytes += col.element_size() * col.numel()
+        return total_bytes / (1024 ** 3)
