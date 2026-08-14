@@ -9,23 +9,23 @@ derivative learning, physics-informed learning, etc.
 A generic PhysycsTask class is defined and all the physics tasks subclass it.
 
 Each specific physics task has to define
-    - an associated loss function, which defines how to compute the relative loss term;
+    - an associated loss function, which defines how to compute the corresponding loss term;
     - a loss_required_labels function, which returns the keys of the labels that are
       necessary to compute the loss function of the task.
 
 Moreover any physics task has associated the following attributes:
-    - weight, containing the weight for the loss term of the task in the multi-objective loss;
-    - loss_value, optionally filled with the last loss value obtained for the task;
-    - grad_norm, optionally filled with the last gradient norm of the task loss term;
-    - grad, optionally filled with the last gradient of the task loss term;
-    - conflict, optionally filled with the last cosine similarity between the gradient of the 
+    - `weight`, containing the weight for the loss term of the task in the multi-objective loss;
+    - `loss_value`, optionally filled with the last loss value obtained for the task;
+    - `grad_norm`, optionally filled with the last gradient norm of the task loss term;
+    - `grad`, optionally filled with the last gradient of the task loss term;
+    - `conflict`, optionally filled with the last cosine similarity between the gradient of the 
       task loss term and a reference gradient vector;
-    - parameters, a dictionary whose elements identify the physical system parameters whose 
+    - `parameters`, a dictionary whose elements identify the physical system parameters whose 
       values are fixed for all the training dataset entries (the ones whose value varies across 
       the dataset entries are supposed to be inputed to the model in order to perform predictions;
       hence, for physics-informed tasks, the varying physics parameters are expected to be part of 
       the task loss function inputs).
-    - id, an identifier string for the task.
+    - `id`, an identifier string for the task.
 """
 
 from typing import Callable
@@ -35,7 +35,7 @@ from StationaryAllenCahn.allen_cahn import AllenCahn
 from model import Pinn
 from typing import List, Self
 
-# ===================================== PhysicsTask class =====================================
+# ===================================== PhysicsTask =====================================
 class PhysicsTask:
 
     def __init__(
@@ -60,11 +60,11 @@ class PhysicsTask:
         loss : Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = None
             Function that computes the loss term of the task.
         weight : float = None
-            Current weight of the task (it weights the loss term of the task in the multi-objective loss function).
+            Current weight of the task (it weights the task loss term in the multi-objective loss function).
 
         Returns
         -------
-        None
+        _None_
         """
         self.id = task_id
         if parameters is None:
@@ -96,15 +96,15 @@ class PhysicsTask:
         u : torch.Tensor = None
             Output labels.
         du : torch.Tensor = None
-            1st derivative labels (vectors).
+            1st derivative labels.
         d2u : torch.Tensor = None
-            2nd derivative labels (matrices).
+            2nd derivative labels.
         input_parameters : dict = None
             Set of varying parameters, which are given in input to the model.
         
         Returns
         -------
-        torch.Tensor
+        _torch.Tensor_
         """
         if input_parameters is None:
             input_parameters = {}
@@ -117,15 +117,26 @@ class PhysicsTask:
 
         Parameters
         ----------
-        None
+        _None_
 
         Returns
         -------
-        List[str]
+        _List_[_str_]
         """
         return []
     
     def copy(self) -> Self:
+        """
+        Copy function.
+
+        Parameters
+        ----------
+        _None_
+
+        Returns
+        -------
+        _PhysicsTask_
+        """
         return PhysicsTask(
             task_id = self.id,
             parameters = self.parameters,
@@ -134,7 +145,7 @@ class PhysicsTask:
             weight = self.weight
         )
 
-
+# ===================================== NeumannBCTask =====================================
 class NeumannBCTask(PhysicsTask):
     """
     Task for Neumann boundary condiitons.
@@ -164,6 +175,7 @@ class NeumannBCTask(PhysicsTask):
     def copy(self) -> Self:
         return NeumannBCTask(weight=self.weight)
 
+# ===================================== NeumannBCTask =====================================
 class DirichletBCTask(PhysicsTask):
     """
     Task for Dirichlet boundary condiitons.
@@ -190,7 +202,8 @@ class DirichletBCTask(PhysicsTask):
     
     def copy(self) -> Self:
         return DirichletBCTask(weight=self.weight)
-    
+
+# ===================================== NeumannBCTask =====================================
 class ICTask(PhysicsTask):
     """
     Task for initial condiitons.
@@ -218,7 +231,8 @@ class ICTask(PhysicsTask):
     
     def copy(self) -> Self:
         return ICTask(weight=self.weight)
-    
+
+# ===================================== NeumannBCTask =====================================
 class OutputTask(PhysicsTask):
     """
     Task for output learning.
@@ -242,7 +256,8 @@ class OutputTask(PhysicsTask):
     
     def copy(self) -> Self:
         return OutputTask(weight=self.weight)
-    
+
+# ===================================== NeumannBCTask =====================================
 class DerivativeTask(PhysicsTask):
     """
     Task for 1st derivative learning.
@@ -266,7 +281,8 @@ class DerivativeTask(PhysicsTask):
     
     def copy(self) -> Self:
         return DerivativeTask(weight=self.weight)
-    
+
+# ===================================== NeumannBCTask =====================================
 class SpatialDerivativeTask(PhysicsTask):
     """
     Task for 1st spatial derivative learning.
@@ -290,7 +306,8 @@ class SpatialDerivativeTask(PhysicsTask):
     
     def copy(self) -> Self:
         return SpatialDerivativeTask(weight=self.weight)
-    
+
+# ===================================== NeumannBCTask =====================================
 class TemporalDerivativeTask(PhysicsTask):
     """
     Task for 1st tempporal derivative learning.
@@ -315,6 +332,7 @@ class TemporalDerivativeTask(PhysicsTask):
     def copy(self) -> Self:
         return TemporalDerivativeTask(weight=self.weight)
 
+# ===================================== NeumannBCTask =====================================
 class Derivative2Task(PhysicsTask):
     """
     Task for 2nd derivative learning.
@@ -339,6 +357,7 @@ class Derivative2Task(PhysicsTask):
     def copy(self) -> Self:
         return Derivative2Task(weight=self.weight)
 
+# ===================================== NeumannBCTask =====================================
 class SpatialDerivative2Task(PhysicsTask):
     """
     Task for 2nd spatial derivative learning.
@@ -363,6 +382,7 @@ class SpatialDerivative2Task(PhysicsTask):
     def copy(self) -> Self:
         return SpatialDerivative2Task(weight=self.weight)
 
+# ===================================== NeumannBCTask =====================================
 class TemporalDerivative2Task(PhysicsTask):
     """
     Task for 2nd temporal derivative learning.
@@ -387,6 +407,7 @@ class TemporalDerivative2Task(PhysicsTask):
     def copy(self) -> Self:
         return TemporalDerivative2Task(weight=self.weight)
 
+# ===================================== NeumannBCTask =====================================
 class AdvectionReactionDiffusionTask(PhysicsTask):
     """
     Task for the advection-reaction-diffusion governing equation.
@@ -405,13 +426,18 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
                 du: torch.Tensor, 
                 d2u: torch.Tensor,
                 v: torch.Tensor,
-                input_parameters: dict = None
+                #input_parameters: dict = None
+                parameters: dict = None
             ) -> torch.Tensor:
-            if input_parameters is None:
-                input_parameters = {}
-            all_parameters = self.parameters | input_parameters
-            all_parameters["v"] = v
-            return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **all_parameters)
+            #if input_parameters is None:
+            #    input_parameters = {}
+            #all_parameters = self.parameters | input_parameters
+            #all_parameters["v"] = v
+            #return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **all_parameters)
+            if parameters is None:
+                parameters = {}
+            parameters["v"] = v
+            return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **parameters)
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn) -> torch.Tensor:
 
@@ -447,6 +473,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             weight = self.weight
         )
 
+# ===================================== NeumannBCTask =====================================
 class StationaryAllenCahnTask(PhysicsTask):
     """
     Task for the stationary Allen-Cahn governing equation.
@@ -457,12 +484,16 @@ class StationaryAllenCahnTask(PhysicsTask):
         def lhs(
                 u: torch.Tensor,
                 d2u: torch.Tensor,
-                input_parameters: dict
+                #input_parameters: dict
+                parameters: dict
         ) -> torch.Tensor:
-            if input_parameters is None:
-                input_parameters = {}
-            all_parameters = self.parameters | input_parameters
-            return AllenCahn.residual(u=u, d2u=d2u, **all_parameters)
+            #if input_parameters is None:
+            #    input_parameters = {}
+            #all_parameters = self.parameters | input_parameters
+            #return AllenCahn.residual(u=u, d2u=d2u, **all_parameters)
+            if parameters is None:
+                parameters = {}
+            return AllenCahn.residual(u=u, d2u=d2u, **parameters)
 
         def loss(x: torch.Tensor, input_params: torch.Tensor, model: Pinn) -> torch.Tensor:
             mse_loss = torch.nn.MSELoss(reduction='mean')

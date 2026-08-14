@@ -2,18 +2,27 @@
 advection_reaction_diffusion.py
 ===========
 
-This module implements the logic for the ARD system class.
+This module implements the `AdvectionReactionDiffusion` class, representing advection-reaction-diffusion systems, giving methods to define a system and to solve (simulate it).
 
 Spatio-temporal domain:
 - Time-dependent
 - 2-dimentional spatial domain
 
 Functions:
-- make_source: Returns a source function.
-- velocity_field: Returns a velocity function.
+- `source_field`
+- For creating explicit source fields:
+    - `constant_source`
+    - `decaying_source`
+    - `oscillating_source`
+    - `temporary_source`
+- For creating implicit source fields:
+    - `logistic_source`
+    - `allen_cahn_source`
+    - `arrhenius_source`
+- `velocity_field`
 
 Classes:
-- AdvectionReactionDiffusion: Implements the ARD system logic and methods.
+- `AdvectionReactionDiffusion`.
 """
 
 import torch
@@ -21,10 +30,9 @@ from fipy import CellVariable, Grid2D, Gmsh2D, TransientTerm, ConvectionTerm, Di
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, Any, List, Tuple, Set
-from derivatives_computation import derivative
 from trajectory import Trajectory
 
-def make_source(
+def source_field(
         sigma: float = 1.0,
         center: tuple = (0.0, 0.0),
         mode: str = "constant",
@@ -94,45 +102,47 @@ def make_source(
     if amp is None: amp = 0.0
     if delta is None: delta = 0.1
     if period is None: period = 5.0
-    #if A is None: A = 1.0
-    #if B is None: B = 1.0
 
     def G(x, y): # Gaussian spot
         return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
 
     if mode == "constant":
-
+        # Constant source
         def source(x, y, t = None, u = None):
             return amp * G(x, y)
         
     elif mode == "decay":
-
+        # Decaying source
         def source(x, y, t, u = None):
             return amp * np.exp(- delta * t) * G(x, y)
         
     elif mode == "oscillate":
         w = 2 * np.pi / period
-
+        # Oscillating source
         def source(x, y, t, u = None):
             return amp * np.sin(w * t) * G(x, y)
     
     elif mode == "temporary":
+        # Temporary source
         def source(x, y, t, u = None):
             return amp * G(x, y) * (t < period)
 
     elif mode == "logistic":
+        # Logistic source
         def source(x = None, y = None, t = None, u = None):
             if u is None:
                 raise TypeError(f"Logistic source missing 1 required argument: 'u'.")
             return A * u**2 - B * u
     
     elif mode == "AllenCahn":
+        # Allen-Cahn-type source
         def source(x = None, y = None, t = None, u = None):
             if u is None:
                 raise TypeError(f"AllenCahn source missing 1 required argument: 'u'.")
             return A * (u**3 - u)
             
     elif mode == "Arrhenius":
+        # Arrhenius-type source
         def source(x = None, y = None, t = None, u = None):
             if u is None:
                 raise TypeError(f"Arrhenius source missing 1 required argument: 'u'.")
@@ -142,7 +152,6 @@ def make_source(
         raise ValueError(f"Argument 'mode' must be 'constant'|'decay'|'oscillate'|'temporary'|'logistic'|'AllenCahn'|'Arrhenius', not {mode}.")
 
     return source
-
 
 def constant_source(
         sigma: float = 1.0,
@@ -391,6 +400,7 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
         - rotation_decay_factor : (float, default: 0.5) rotation decay factor (for alpha_mode = "exp")
         - radial_expansion_decay_factor : (float, default: 0.5) expansion decay factor (for beta_mode = "exp").
     """
+    # Law for evolving the coefficients of the velocity vecrtor components
     def law(mode, weight, frequency = None, decay_factor = None):
         # mode: scheduling over time (const, sin, cos, exp)
         # weight: multiplying coefficient
@@ -413,7 +423,7 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
         return f
 
     if field == "rotation_expansion":
-        # defaults
+        # Defaults
         rotation_weight = p.get("rotation_weight", 1.0)
         radial_expansion_weight = p.get("radial_expansion_weight", 0.0)
         rotation_mode = p.get("rotation_mode", "const")
@@ -423,7 +433,7 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
         rotation_decay_factor = p.get("rotation_decay_factor", 1.0) # (rotation mode = "exp")
         radial_expansion_decay_factor = p.get("radial_expansion_decay_factor", 1.0) # (expansion mode = "exp")
 
-        # rotation time law
+        # Rotation time law
         a = law(
                 mode=rotation_mode,
                 weight=rotation_weight,
@@ -431,7 +441,7 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
                 decay_factor=rotation_decay_factor
             )
         
-        # radial expantion time law
+        # Radial expantion time law
         b = law(
                 mode=radial_expansion_mode,
                 weight=radial_expansion_weight, 
@@ -439,6 +449,7 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
                 decay_factor=radial_expansion_decay_factor
             )
 
+        # Velocity vector field
         def v(x, y, t):
             a_t = a(t)
             b_t = b(t)
@@ -459,18 +470,20 @@ class AdvectionReactionDiffusion:
         Velocity field function.
     s : Callable
         Source field function.
-    implicit_source : str
+    i_s : str
         Implicit source, i.e. use u, "logistic", "Arrhenius" or "AllenCahn".
-    A : float
-        Implicit source parameter.
-    B : float
-        Implicit source parameter.
     D : float
         Diffusion coefficient.
-    x : np.ndarray
-        x coordinates of grid points.
-    y : np.ndarray
-        y coordinates of grid points.
+    x : CellVariable | np.ndarray
+        x coordinates of cell centers of the spatial grid.
+    y : CellVariable | np.ndarray
+        y coordinates of cell centers of the spatial grid.
+    x_faces : FaceVariable | np.ndarray
+        x coordinates of cell faces of the spatial grid.
+    y_faces : FaceVariable | np.ndarray
+        y coordinates of cell faces of the spatial grid.
+    dx : float
+        Spatial resolution of the spatial grid.
     xmin : float
         Minimum x coordinate value.
     ymin : float
@@ -483,20 +496,8 @@ class AdvectionReactionDiffusion:
         Shape of the system domain: "rectangle" | "circle".
     mesh : Grid2D | Gmsh2D
         Mesh of the grid domain of points. 
-    t : list
-        Time instants values list.
     u0 : np.ndarray
         Initial conditions, i.e. initial (at t0) u values.
-    u : list
-        List of u values (one item per time instant).
-    du : list
-        List of du values (one item per time instant).
-    d2u : list
-        List of d2u values (one item per time instant).
-    velocity : list
-        Trajectory of the velocity vector field.
-    source : list
-        Trajectory of the source scalar field.
     boundary_mode : str
         Boundary mode for the circle.
     boundary_value :
@@ -517,6 +518,8 @@ class AdvectionReactionDiffusion:
         Boundary mode for the bottom side of the rectangle.
     bottom_value : float
         Boundary value for the bottom side of the rectangle.
+    trajectory : Trajectory
+        Simulated trajectory of the system.
     """
 
     def __init__(
@@ -533,14 +536,24 @@ class AdvectionReactionDiffusion:
         ----------
         velocity : Callable
             Velocity field.
+            - Default: 
+            `velocity_field(
+                rotation_mode="const", 
+                radial_expansion_mode="const", 
+                rotation_weight=1.0, 
+                radial_expansion_weight=0.0
+            )`.
         source : Callable
             Source function defined on spatio-temporal coordinates.
+            - Default: `constant_source()`.
         implicit_source : Callable
             Source function defined in terms of u.
+            - Default: `constant_source()`.
         diffusion_coeff : float
-            The diffusion coefficient (default: 0).
+            The diffusion coefficient.
+            - Default: `0.0`.
         """
-
+        # Set the velocity field
         if velocity is None:
             self.v = velocity_field(
                 rotation_mode="const", 
@@ -551,6 +564,7 @@ class AdvectionReactionDiffusion:
         else:
             self.v = velocity
 
+        # Set the source field
         if source is None:
             self.s = constant_source()
         else:
@@ -567,6 +581,7 @@ class AdvectionReactionDiffusion:
         
         # Spatial grid
         self.x, self.y = None, None
+        self.x_faces, self.y_faces = None, None
         self.xmin, self.xmax = None, None
         self.ymin, self.ymax = None, None
         self.mesh = None
@@ -575,13 +590,13 @@ class AdvectionReactionDiffusion:
         # Initial state
         self.u0 = None
 
-        # Rectangular domain: sides modes and values
+        # Rectangular domain: boundary modes and values
         self.left_mode, self.left_value = None, None
         self.right_mode, self.right_value = None, None
         self.top_mode, self.top_value = None, None
         self.bottom_mode, self.bottom_value = None, None
 
-        # Circular domain: mode and value
+        # Circular domain: boundary mode and value
         self.boundary_mode = None
         self.boundary_value = None
 
@@ -603,7 +618,7 @@ class AdvectionReactionDiffusion:
         Set the spatial (2D) domain, filling
         - self.x, self.y,
         - self.x_faces, self.y_faces,
-        - self.xmax, self.ymax.
+        - self.xmax, self.xmin, self.ymax, self.ymin.
 
         Parameters
         ----------
@@ -657,6 +672,7 @@ class AdvectionReactionDiffusion:
         # CIRCULAR GRID
         elif mode == "circle":
             # Generate circular mesh
+            # (this require gmsh)
             self.mesh = Gmsh2D(f'''
                 Point(1) = {{0, 0, 0, {cell_size}}};
                 Point(2) = {{{radius}, 0, 0, {cell_size}}};
@@ -681,7 +697,7 @@ class AdvectionReactionDiffusion:
             # (faceCenters returns (2, n_faces))
             self.x_faces, self.y_faces = self.mesh.faceCenters
 
-            # Update domain bounds for the Viewer
+            # Update domain bounds
             self.xmin, self.xmax = -radius, radius
             self.ymin, self.ymax = -radius, radius
 
@@ -733,12 +749,34 @@ class AdvectionReactionDiffusion:
             Used if gaussian is True; amplitudes, one for each center, regulate the height of each Gaussian.
         sigmas : list
             Used if gaussian is True; regulate the width of each Gaussian.
+        A : float
+            Parameter to shape the initial state (see above).
+        Ax : float
+            Parameter to shape the initial state (see above).
+        Ay : float
+            Parameter to shape the initial state (see above).
+        B : float
+            Parameter to shape the initial state (see above).
+        Bx : float
+            Parameter to shape the initial state (see above).
+        By : float
+            Parameter to shape the initial state (see above).
+        Cx : float
+            Parameter to shape the initial state (see above).
+        Cy : float
+            Parameter to shape the initial state (see above).
+        D : float
+            Parameter to shape the initial state (see above).
+        min_noise : float
+            Parameter to shape the initial state (see above).
+        max_noise : float
+            Parameter to shape the initial state (see above).
         
         Returns
         -------
         None
         """
-        # Base scalar field, which can be successively deformed by adding bumps, valleys
+        # Base scalar field, which can be successively deformed by adding bumps, valleys or uniform noise.
         if u0 is not None:
             self.u0 = u0 * np.ones_like(self.x)
         else:
@@ -792,8 +830,10 @@ class AdvectionReactionDiffusion:
         """
         Set the boundary conditions (Neumann or Dirichlet).
         Default: Neumann with 0 value.
-        - For rectangular domains each side can have its own condition (Neumann or Dirichlet)
+        - For rectangular domains each side can have its own condition (Neumann or Dirichlet).
         - For circular domains the BC is specified for all the entire circumference.
+        - Neumann condition -> the value is the outward flux.
+        - Dirichlet condition -> the value is the u value on the boundary.
 
         Parameters
         ----------
@@ -845,8 +885,7 @@ class AdvectionReactionDiffusion:
             figsize: tuple = (3.5, 3.5)
             ) -> None:
         """
-        Solve the system on the domain points and produce a trajectory, updating the object state.
-        Finite differences numerical simulation with backward Euler time discretization.
+        Solve the system (numerical simulation) on the domain points and produce a trajectory, updating the object state.
 
         Parameters
         ----------
@@ -856,8 +895,12 @@ class AdvectionReactionDiffusion:
             Final time value.
         dt : float
             Time step.
+        n_samples : int
+            Simulation samples to store along the timeline.
+        seed : int
+            Seed for the uniform at random sampling of the `n_samples` points along the timeline.
         snapshot_times : set
-            Set of time values on which to store the computed solution values.
+            Set of time values on which to store the full grid of computed solution values.
         vmin : float
             Minimum value for visualization.
         vmax : float
@@ -871,13 +914,14 @@ class AdvectionReactionDiffusion:
         -------
         None
         """
+        # Cell variable for the solution field
         rho = CellVariable(name="rho", mesh=self.mesh)
 
         # Set the initial field
         rho.setValue(self.u0)
 
         # Set the BCs (Neumann or Dirichlet)
-        # Rectangular domain
+        ## Rectangular domain
         if self.shape == "rectangle":
             modes = [self.left_mode, self.right_mode, self.top_mode, self.bottom_mode]
             values = [self.left_value, self.right_value, self.top_value, self.bottom_value]
@@ -887,17 +931,17 @@ class AdvectionReactionDiffusion:
                     rho.faceGrad.constrain(value, meshFaces)
                 elif mode == "Dirichlet":
                     rho.constrain(value, meshFaces)
-        # Circular domain
+        ## Circular domain
         elif self.shape == "circle":
             if self.boundary_mode == "Neumann":
                 rho.faceGrad.constrain(self.boundary_value, self.mesh.exteriorFaces)
             elif self.boundary_mode == "Dirichlet":
                 rho.constrain(self.boundary_value, self.mesh.exteriorFaces)
 
-        # Time instants to simulate
+        # Time instants to simulate (the timeline)
         timeline = np.arange(start=t0, stop=tN, step=dt)
 
-        # Snapshots to store
+        # Snapshot times
         if snapshot_times is None:
             snapshot_times = []
 
@@ -926,32 +970,31 @@ class AdvectionReactionDiffusion:
         # Initialize a trajectory object
         if self.shape == "rectangle":
             self.trajectory = Trajectory(x_coords=self.x, y_coords=self.y, nt=len(timeline), dt=dt, n_samples=n_samples, snapshot_times=snapshot_times, shape=self.shape, nx=self.mesh.nx, ny=self.mesh.ny, dx=self.dx, seed=seed)
-        else:
+        else: # "circle"
             self.trajectory = Trajectory(x_coords=self.x, y_coords=self.y, nt=len(timeline), dt=dt, n_samples=n_samples, snapshot_times=snapshot_times, shape=self.shape, seed=seed)
 
         # Run simulation
-        t_prev = timeline[0]
         for i, t in enumerate(timeline):
-            # Compute velocity field
+            ## Instanciate the velocity field
             v_value = self.v(self.x_faces, self.y_faces, t)
 
-            # Compute source fields
+            ## Instanciate the source fields
             s_value = self.s(self.x, self.y, t)
             i_s_value = self.i_s(rho.value.copy())
 
-            # Update variables
+            ## Update velocity and source variables
             velocity.setValue(v_value)
             source_term.setValue(s_value)
             implicit_source_term.setValue(i_s_value)
 
-            # Update the trajectory
+            ## Update the trajectory by appending the current frame
             self.trajectory.append(t=t, f_snapshot=rho.value.copy(), velocity_snapshot=self.v(self.x, self.y, t), source_snapshot=s_value)
 
-            # Simulation visualization
+            ## Simulation visualization
             if self.shape == "rectangle":
                 viewer.plot()
 
-            # Simulation step
+            ## Simulation step
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
             eq.solve(var=rho, dt=dt)
 

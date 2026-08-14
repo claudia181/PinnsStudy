@@ -5,6 +5,8 @@ phy_sys_dataset.py
 This module implements the dataset containing the informations relative to a physical system
 (subcalssing the torch.utils.data.Dataset class).
 
+Class: PhySysDataset
+
 Attributes:
     - cols: a dictionary {(col_name: str, col_values: torch.Tensor)}, where each element represent 
             a column of the dataset and the column vaues are all tensors of the same length, 
@@ -18,26 +20,30 @@ Attributes:
                col_key = "spacetime", subkeys = ["x", "y", "t"].
 
 'Public' methods:
-    - columns: None -> List[Tensor].
+    - `columns`: None -> List[Tensor].
         It returns the list of column tensors.
-    - get_column: str, Callable[Tensor, bool] -> Tensor.
+    - `get_column`: str, Callable[Tensor, bool] -> Tensor.
         It returns the elements of the column identified by the string for which the condition callable returns True.
-    - add_column: str, Tensor, List[str] -> None.
+    - `add_column`: str, Tensor, List[str] -> None.
         It add the column named with the string, valued with the tensor and with subkeys the list of strings.
-    - set subkeys: str, List[str] -> None
+    - `set_subkeys`: str, List[str] -> None
         It sets the subkeys for the column identifyed by the string.
-    - subsample: Tensor -> PhySysDataset
+    - `index`: str, str -> int.
+        It returns the index of the column subkey.
+    - `subsample`: Tensor -> PhySysDataset.
         It subsamples the rows/points corresponding to the indices in the tensor.
-    - merge: PhySysDataset -> None.
+    - `merge`: PhySysDataset -> None.
         It merges the passed dataset with the one of the object. 
-    - copy: None -> PhySysDataset.
+    - `copy`: None -> PhySysDataset.
         Shallow copy method: the tensors representing columns are shared.
-    - deep_copy: None -> PhySysDataset.
+    - `deep_copy`: None -> PhySysDataset.
         Deep copy method: Nothing shared.
-    - save: str -> None
+    - `save`: str -> None
         It stores the dataset in the file identified by the path string.
+    - `size_gb`: List[str] -> float.
+        It returns the size in gigabytes of the dataset.
 
-Class methods:
+Static methods:
     - load: str -> PhySysDataset
         It load the dataset in the file identified by the string.
 """
@@ -46,6 +52,7 @@ import torch
 from torch.utils.data import Dataset
 from typing import List, Callable, Tuple, Self, Dict
 
+# ===================================== PhySysDataset class =====================================
 class PhySysDataset(Dataset):
     # ------------ Subclassing methods ------------
     def __init__(self, cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor]) -> None:
@@ -82,22 +89,26 @@ class PhySysDataset(Dataset):
             item[key] = self.cols[key][idx]
         return item
     
-    # ------------ Class methods ------------
+    # ------------ Public methods ------------
     def columns(self) -> List[torch.Tensor]:
         """
+        Returns the columns of the dataset.
+
         Parameters
         ----------
         None
 
         Returns
         -------
-        List[torch.Tensor]
-            The list of columns.
+        _List_[_torch.Tensor_]
+        - The list of columns.
         """
         return [self.cols[key] for key in self.cols.keys()]
     
     def get_column(self, key: str, condition: Callable[[torch.Tensor], bool] = None) -> torch.Tensor:
         """
+        Returns the items of the column `key` satisfying the `condition`.
+
         Parameters
         ----------
         key : str
@@ -107,7 +118,7 @@ class PhySysDataset(Dataset):
 
         Returns
         -------
-        torch.Tensor
+        _torch.Tensor_
         """
         if key not in self.cols.keys():
             raise ValueError(f"Column of key {key} not in dataset.")
@@ -121,6 +132,8 @@ class PhySysDataset(Dataset):
     
     def add_column(self, key: str, col: torch.Tensor, subkeys: List[str] = []) -> None:
         """
+        Add the column `col` of key `key` and with subkeys `subkeys`.
+
         Parameters
         ----------
         key : str
@@ -132,7 +145,7 @@ class PhySysDataset(Dataset):
 
         Returns
         -------
-        None
+        _None_
         """
         if len(col) != self.length:
             raise ValueError(f"Column of length {len(col)}, but expected of length {self.length}.")
@@ -144,6 +157,8 @@ class PhySysDataset(Dataset):
     
     def set_subkeys(self, key: str, subkeys: List[str]) -> None:
         """
+        Set the subkeys `subkeys` for column of key `key`.
+
         Parameters
         ----------
         key : str
@@ -153,7 +168,7 @@ class PhySysDataset(Dataset):
 
         Returns
         -------
-        None
+        _None_
         """
         if key not in self.cols.keys():
             raise ValueError(f"Column of key {key} not in dataset.")
@@ -163,6 +178,8 @@ class PhySysDataset(Dataset):
     
     def index(self, key: str, subkey: str) -> int:
         """
+        Returns the index of the subkey `subkey` of column `key`.
+
         Parameters
         ----------
         key : str
@@ -171,8 +188,8 @@ class PhySysDataset(Dataset):
             The column subkey.
         Returns
         -------
-        int
-            The index of the column subkey.
+        _int_
+        - The index of the column subkey.
         """
         for i, sk in enumerate(self.subkeys[key]):
             if sk == subkey:
@@ -181,6 +198,9 @@ class PhySysDataset(Dataset):
     
     def subsample(self, indices: torch.Tensor) -> Self:
         """
+        Returns a _PhySysDataset_ with subsampled columns. 
+        The subsampled rows are the ones of indexes `indices`.
+
         Parameters
         ----------
         indices : torch.Tensor
@@ -200,6 +220,8 @@ class PhySysDataset(Dataset):
     
     def merge(self, dataset: Self) -> None:
         """
+        Merge the _PhySysDataset_ `dataset` the current one.
+
         Parameters
         ----------
         dataset : PhySysDataset
@@ -207,7 +229,7 @@ class PhySysDataset(Dataset):
 
         Returns
         -------
-        None
+        _None_
         """
         if len(dataset.cols.keys()) != len(self.cols.keys()):
             raise ValueError(f"Different columns to merge: {self.cols.keys()} != {dataset.cols.keys()}.")
@@ -219,13 +241,15 @@ class PhySysDataset(Dataset):
     
     def copy(self) -> Self:
         """
+        Copy method.
+
         Parameters
         ----------
-        None
+        _None_
 
         Returns
         -------
-        PhySysDataset
+        _PhySysDataset_
         """
         ds_copy = PhySysDataset(self.cols.copy())
         ds_copy.subkeys = self.subkeys.copy()
@@ -233,13 +257,15 @@ class PhySysDataset(Dataset):
     
     def deep_copy(self) -> Self:
         """
+        Deep copy method.
+
         Parameters
         ----------
-        None
+        _None_
 
         Returns
         -------
-        PhySysDataset
+        _PhySysDataset_
         """
         new_cols = {key: col.clone() for key, col in self.cols.items()}
         ds_copy = PhySysDataset(new_cols)
@@ -248,6 +274,9 @@ class PhySysDataset(Dataset):
     
     def save(self, dst_file: str) -> None:
         """
+        Save the dataset in `dst_file` as a dictionary
+        {"cols": self.cols, "subkeys": self.subkeys}.
+
         Parameters
         ----------
         dst_file : str
@@ -255,36 +284,25 @@ class PhySysDataset(Dataset):
 
         Returns
         -------
-        None
+        _None_
         """
         d = {
             "cols": self.cols,
             "subkeys": self.subkeys
         }
         torch.save(d, dst_file)
-    
-    @staticmethod
-    def load(src_file: str) -> Self:
-        """
-        Parameters
-        ----------
-        src_file : str
-            Filepath of the dataset to load.
-
-        Returns
-        -------
-        """
-        d = torch.load(src_file, weights_only=False)
-        dataset = PhySysDataset(cols=d["cols"])
-        for key in d["subkeys"]:
-            dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
-        return dataset
 
     def size_gb(self, col_ids: List[str] = None) -> float:
         """
+        Returns the size in Gb of the dataset.
+
         Parameters
         ----------
         columns : List[str]
+
+        Returns
+        -------
+        _float_
         """
         total_bytes = 0.0
         if col_ids is None:
@@ -293,3 +311,24 @@ class PhySysDataset(Dataset):
             col = self.cols[col_str]
             total_bytes += col.element_size() * col.numel()
         return total_bytes / (1024 ** 3)
+
+    # ------------ Static methods ------------
+    @staticmethod
+    def load(src_file: str) -> Self:
+        """
+        Load the _PhySysDataset_ saved in `src_file`.
+
+        Parameters
+        ----------
+        src_file : str
+            Filepath of the dataset to load.
+
+        Returns
+        -------
+        _PhySysDataset_
+        """
+        d = torch.load(src_file, weights_only=False)
+        dataset = PhySysDataset(cols=d["cols"])
+        for key in d["subkeys"]:
+            dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
+        return dataset

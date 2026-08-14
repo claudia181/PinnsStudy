@@ -6,10 +6,10 @@ This module implements the trajectory class, instantiable in trajectory objects 
 For the moment, it considers advection-reaction-diffusion systems (allowing trajectories with velocities and sources).
 
 Functions:
-- stream_spacetime_samples: Subsample a sequence of frames uniformly at random.
+- `stream_spacetime_samples`: Subsample a sequence of frames uniformly at random.
 
 Classes:
-- Trajectory: Implements a trajectory object.
+- `Trajectory`: Implements a trajectory object.
 """
 
 import torch
@@ -112,7 +112,7 @@ class Trajectory:
     dx : float
         Spatial resolution (distance btw adjacent points in a frame).
     dt : float
-        Temporal resolution (distance btw adjacent points in the timeline)
+        Temporal resolution (distance btw adjacent points in the timeline).
     nt_count : int
         The number of points along the timeline that have been simulated.
     snapshot_times : List[float]
@@ -153,16 +153,28 @@ class Trajectory:
 
         Parameters
         ----------
-        task_id : str
-            Task identifier.
-        parameters : dict = None
-            Set of fixed parameters.
-        lhs : Callable[..., torch.Tensor] = None
-            Function that computes the left hand side of the equation (in case of physics-informed task).
-        loss : Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = None
-            Function that computes the loss term of the task.
-        weight : float = None
-            Current weight of the task (it weights the loss term of the task in the multi-objective loss function).
+        x_coords : torch.Tensor
+            x-coordinates of the full grid (shape (nx * ny,)).
+        y_coords : torch.Tensor
+            y-coordinates of the full grid (shape (nx * ny,)).
+        nt : int
+            Number of points along the timeline.
+        dt : float
+            Temporal resolution (distance btw adjacent points in the timeline).
+        n_samples : int
+            Total number of trajectory samples to store (len(self.f)).
+        snapshot_times : List[float]  
+            Points along the timeline where to take a full snapshot of the trajectory.
+        shape : str
+            Shape of the spatial domain of the system ("rectangle" or "circle").
+        seed : int
+            Seed for the uniform random sampling of the n_samples points along the trajectory.
+        nx : int
+            Number of grid points along the horizontal x-side.
+        ny : int
+            Number of grid points along the vertical y-side.
+        dx : float
+            Spatial resolution (distance btw adjacent points in a frame).
 
         Returns
         -------
@@ -214,6 +226,21 @@ class Trajectory:
         self.t_full = []
 
     def _subsample(self, tensor_list: List[torch.Tensor], t_index: int) -> List[torch.Tensor]:
+        """
+        Subsample each tensor in `tensor_list`, according to the `t_index` set of indexes.
+
+        Parameters
+        ----------
+        tensor_list : List[torch.Tensor]
+            Tensors to subsample.
+        t_index : int
+            Index of the set of indexes in `self._sampled_indexes`.
+        
+        Returns
+        -------
+        List[torch.Tensor]
+        - The subsampled tensors.
+        """
         return [tensor[self._sampled_indexes[t_index]] for tensor in tensor_list]
     
     def append(
@@ -224,16 +251,22 @@ class Trajectory:
             source_snapshot: torch.Tensor | np.ndarray
     ) -> None:
         """
-        Left hand side. It calls self._lhs.
+        Append a new frame to the trajectory.
 
         Parameters
         ----------
-        n : torch.Tensor = None
-            Outward normal vectors to the boundary.
-        
+        t : float
+            Temporal coordinate of the frame to append.
+        f_snapshot : torch.Tensor | np.ndarray
+            Full f field of the xy frame to append.
+        velocity_snapshot : torch.Tensor | np.ndarray
+            Full velocity field of the xy frame to append.
+        source_snapshot : torch.Tensor | np.ndarray
+            Full source field of the xy frame to append.
+
         Returns
         -------
-        torch.Tensor
+        _None_
         """
         if self.status == "closed":
             raise ValueError(f"Trajectory closed.")
@@ -291,6 +324,9 @@ class Trajectory:
                 self._store_full_snapshot()
 
     def _close(self) -> None:
+        """
+        Close a completed trajectory (a trajectory which has reached the end of its timeline).
+        """
         x, y, f, velocity, source = self._subsample(tensor_list=[self.x_full, self.y_full, self._f_buf[-1], self._velocity_buf[-1], self._source_buf[-1]], t_index=self.nt_count-1)
 
         self.x.append(x)
@@ -311,6 +347,9 @@ class Trajectory:
         self.status = "closed"
 
     def _store_full_snapshot(self) -> None:
+        """
+        Append full snapshots to the trajectory according to the content of `self._pending_snapshots`.
+        """
         for ti in self._pending_snapshots:
             self.t_full.append(self.t[ti])
 
