@@ -30,8 +30,11 @@ class Pinn(torch.nn.Module):
     """
     Class representing a PINN model.
 
-    State
-    -----
+    **State**
+    ---------
+
+    General attributes
+    ------------------
         device : str 
             Device on which the model is.
         temporal_input : int
@@ -40,11 +43,9 @@ class Pinn(torch.nn.Module):
             Number of spatial input dimentions (0, 1, 2 or 3).
         param_input : int
             Number of system parametrization input dimentions (0, 1, 2, ...).
-        ff_encoding : bool
-            True if ff encoding is applied.
         input_units : int
             Number of input units.
-        hidden_units : int
+        hidden_units : List[int]
             List containing the number of units for each hidden layer.
         activation : callable
             The activation function of the network (Tanh).
@@ -54,23 +55,27 @@ class Pinn(torch.nn.Module):
             List of tasks on which the model is trained.
         eval_task_list : List[PhysicsTask]
             List of tasks on which the model is evaluated.
-        ewc : bool
-            True is EWC regularization is used for training.
-        dwa_mode : str
-            Identifier of the training loss weighting schema used (in ["Off", "Std", "Norm1", or "NormK"]).
         monitor_conflicts : bool
             True if training gradient conflicts are monitored.
         loss_container : callable
             The loss function (nn.MSELoss(reduction='mean')).
-        net : the NN
+        net : the NN.
 
+    Dynamic weight adaptation
+    -------------------------
+        dwa_mode : str
+            Identifier of the training loss weighting schema used (in ["Off", "Std", "Norm1", or "NormK"]).
         dwa_alpha : float
             DWA moving avg factor.
         dwa_moving_avg_frequency : int
             DWA weights updating frequency.
         dwa_warm_up : int
             Number of steps to wait before starting DWA.
-        
+
+    Fourier feature encoding
+    ------------------------
+        ff_encoding : bool
+            True if ff encoding is applied.
         B : torch.Tensor
             Frequency matrix for the random ff encoding.
         fourier_features : int
@@ -78,6 +83,10 @@ class Pinn(torch.nn.Module):
         frequency_variance : float
             Variance for B items sampling.
         
+    Elastic weight consolidation
+    ----------------------------
+        ewc : bool
+            True is EWC regularization is used for training.
         ewc_objective_weights : torch.Tensor
             Vector of weights of the EWC model.
         ewc_fisher_diag : torch.Tensor
@@ -94,7 +103,7 @@ class Pinn(torch.nn.Module):
     def __init__(
             self,
             device: str,
-            hidden_units: list,
+            hidden_units: List[int],
             activation_str: str = "tanh",
             temporal_input: int = 1,
             spatial_input: int = 2,
@@ -103,12 +112,12 @@ class Pinn(torch.nn.Module):
             **kwargs
         ) -> None:
         """
-        Initialize a PINN.
+        Constructor initializing the PINN.
 
         Parameters
         ----------
         device : str
-        hidden_units : list
+        hidden_units : List[int]
             List of the hidden units of the model.
         activation_str : str
             String identifying the activation function of the network (according to ACTIVATION dict).
@@ -116,53 +125,66 @@ class Pinn(torch.nn.Module):
             1 if the time is provided as input, 0 otw.
         spatial_input : int
             Number of spatial dimensions in input.
-        param_input : list
+        param_input : int
             Number of parametrization dimensions in input.
         
         Returns
         -------
-        None.
+        _None_
         """
         super().__init__(*args, **kwargs)
         
-        # Set the parameters
+        # Device
         self.device = device
 
+        # Number of temporal inputs (0 or 1)
         self.temporal_input = temporal_input
+
+        # Number of spatial inputs (0, 1, 2 or 3)
         self.spatial_input = spatial_input
+
+        # Number of physical system parameters
         self.param_input = param_input
 
+        # Fourier encoding
         self.ff_encoding = False
 
+        # Total number of input units
         self.input_units = spatial_input + temporal_input + param_input
+
+        # List of the number of hidden units of each layer
         self.hidden_units = hidden_units
 
+        # String identifier of the NN activation function
         self.activation_str = activation_str
+
+        # NN activation function
         self.activation = ACTIVATION[activation_str]()
 
         # Build the network
         self._build_net()
 
+        # List of training PhysicsTask objects
         self.train_task_list = []
+
+        # List of evaluation PhysicsTask objects
         self.eval_task_list = []
+
+        # Elastic weight consolidation
         self.ewc = False
+
+        # Dynamic weight adaptation
         self.dwa_mode = "Off"
+
+        # Conflicts' monitoring
         self.monitor_conflicts = False
 
-        # Define the loss container: average over all elements (it always return a scalar in R)
+        # Define the loss container: average over all elements of the loss tensor (it always return a scalar in R)
         self.loss_container = nn.MSELoss(reduction='mean')
 
     def _build_net(self) -> None:
         """
-        Build the NN and save it in the 'net' state variable.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        None
+        Build the NN and save it in the `net` state variable.
         """
         net_dict = OrderedDict()
 
@@ -182,7 +204,7 @@ class Pinn(torch.nn.Module):
         #for i in range(0, len(hidden_units + 1)):
         #    init.xavier_normal_(net_dict[f"lin{i}"], gain=1.0)
 
-        # Set the network architecture
+        # Final network architecture
         self.net = nn.Sequential(net_dict)#.to(self.device)
 
     def set_ff(self, B: torch.Tensor) -> None:
@@ -196,17 +218,23 @@ class Pinn(torch.nn.Module):
 
         Returns
         -------
-        None.
+        _None_
         """
-        # Set the encoding matrix B
+        # Set and register the B frequency mtx in the model state
         self.register_buffer("B", B) # self.B = B
 
         # Update the model state
+
+        ## Number of Fourier features
         self.fourier_features = B.shape[1]
+
+        ## New total number of input units
         self.input_units = 2 * (self.spatial_input + self.temporal_input) * self.fourier_features + self.param_input
+
+        ## Fourier encoding application
         self.ff_encoding = True
 
-        # Rebuild the network
+        ## Rebuild the network
         self._build_net()
     
     def sample_B_and_set_ff(self, n_fourier_features: int, frequency_variance: float, seed: int = 42) -> None:
@@ -225,19 +253,32 @@ class Pinn(torch.nn.Module):
 
         Returns
         -------
-        None.
+        _None_
         """
         # Sample the frequency matrix B
         torch.manual_seed(seed)
+
         #self.B = torch.randn(2 * (self.spatial_input + self.temporal_input), n_fourier_features) * frequency_variance
         #self.B = self.B.to(self.device)
+
+        # Random generation of the frequency mtx B s.t. it convert the spatio-temporal inputs into n_fourier_features features
         B = torch.randn(2 * (self.spatial_input + self.temporal_input), n_fourier_features) * frequency_variance
+
+        # Set and register the B mtx in the model state
         self.register_buffer("B", B)
 
         # Update the model state
+        
+        ## Number of Fourier features
         self.fourier_features = n_fourier_features
+
+        ## Variance of the 0-centered Gaussian distribution from which B is sampled.
         self.frequency_variance = frequency_variance
+
+        ## Fourier encoding application
         self.ff_encoding = True
+
+        ## New total number of input units
         self.input_units = 2 * (self.spatial_input + self.temporal_input) * self.fourier_features + self.param_input
 
         # Rebuild the network
@@ -268,12 +309,23 @@ class Pinn(torch.nn.Module):
         -------
         None.
         """
+        # Check the available DWA modes
         if dwa_mode not in DWA_MODES:
             raise ValueError(f"Parameter 'dwa_mode' must be in {DWA_MODES}, not {dwa_mode}.")
+        
+        # DWA method
         self.dwa_mode = dwa_mode
+
+        # DWA running average factor
         self.dwa_alpha = dwa_alpha
+
+        # Frequency of update of weights
         self.dwa_moving_avg_frequency = dwa_moving_avg_frequency
+
+        # Number of steps to wait before applying the DWA method
         self.dwa_warm_up = dwa_warm_up
+
+        # Counter to account for the weights' update frequency
         self.dwa_moving_avg_count = 0
     
     def set_ewc(
@@ -306,25 +358,44 @@ class Pinn(torch.nn.Module):
 
         Returns
         -------
-        None.
+        _None_
         """
+        # Size of the diagonal of the Fisher information matrix
         diag_len = len(ewc_fisher_diag)
+
+        # Number of optimal weights of the attracting model.
         n_weights_ewc = len(ewc_objective_weights)
+
+        # Number of weights of the underlying model
         n_weights = sum(p.numel() for p in self.parameters())
 
+        # Check if the number of items in the Fisher diagonal match the number of weights of the attracting model
         if diag_len != n_weights_ewc:
             raise ValueError(f"The diagonal of the Fisher information ({diag_len} elements) must have many elements as the number parameters of the EWC model ({n_weights_ewc}).")
-        
+
+        # Check if the number of items in the Fisher diagonal match the number of weights of the underlying model
         if diag_len != n_weights:
             raise ValueError(f"The diagonal of the Fisher information ({diag_len} elements) must have many elements as the number parameters of the model ({n_weights}).")
-        
+
+        # Balancing weight of the EWC term in the loss function
         self.ewc_weight = ewc_weight
+
+        # Authomatic determination of the balancing weight of the EWC term in the loss
         self.ewc_auto_weighting = ewc_auto_weighting
+
+        # Set and register the attracting model weights in the model state
         self.register_buffer("ewc_objective_weights", ewc_objective_weights)
+
+        # Set and register the Fisher diagonal in the model state
         self.register_buffer("ewc_fisher_diag", ewc_fisher_diag)
+
+        # Number of training steps to wait before applying EWC regularization
         self.ewc_warm_up = ewc_warm_up
+
+        # Decay factor for the EWC weight in the loss
         self.ewc_decay = ewc_decay
 
+        # Apply EWC
         self.ewc = True
 
     def set_conflict_monitoring(
@@ -345,9 +416,12 @@ class Pinn(torch.nn.Module):
         
         Returns
         -------
-        None.
+        _None_
         """
+        # Apply conflict monitoring
         self.monitor_conflicts = monitor_conflicts
+
+        # PhysicsTask wrt which compute the conflicts
         self.conflict_reference_task = conflict_reference_task
     
     def set_train_tasks(
@@ -364,8 +438,9 @@ class Pinn(torch.nn.Module):
         
         Returns
         -------
-        None.
+        _None_
         """
+        # List of training PhysicsTask
         self.train_task_list = train_task_list
 
     def set_eval_tasks(
@@ -382,8 +457,9 @@ class Pinn(torch.nn.Module):
         
         Returns
         -------
-        None.
+        _None_
         """
+        # List of evaluation PhysicsTask
         self.eval_task_list = eval_task_list
 
     # Forward function for batches of data
@@ -400,40 +476,28 @@ class Pinn(torch.nn.Module):
 
         Returns
         -------
-        torch.Tensor
+        _torch.Tensor_
             The output of the PINN.
         """
-        if self.fourier_features is not None:
+        # Check if the number of spatio-temporal coordinates in input is correct
+        if x.shape[-1] != self.spatial_input + self.temporal_input:
+            raise ValueError(f"The NN expect {self.spatial_input + self.temporal_input} spatio-temporal coordinates in input, but got {x.shape[-1]} instead.")
+        if self.ff_encoding:
+            # Apply the Fourier encoding
             x = 2 * torch.pi * x @ self.B
-            x = torch.cat([torch.sin(x), torch.cos(x)], axis=-1)
-        if pde_params is not None and pde_params != []:
+            x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+
+        if self.param_input != 0:
+            # Check if the number of physical system parameters in input is correct
+            if pde_params.shape[-1] != self.param_input:
+                raise ValueError(f"The NN expect {self.param_input} physical system parameters in input, but got {pde_params.shape[-1]} instead.")
+            
+            # Concatenate the needed parameters of the physical system to the spatio-temporal input
             x = torch.cat([x, pde_params], dim=-1)
-        return self.net(x).squeeze(-1)
-    
-    # Forward function for individual samples
-    def _forward_single(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
-        """
-        Perform an inference step on a single input point.
 
-        Parameters
-        ----------
-        x : torch.Tensor
-            Spatio-temporal input.
-        pde_params : torch.Tensor
-            PDE parameters input.
-
-        Returns
-        -------
-        torch.Tensor
-            The output of the PINN.
-        """
-        if self.fourier_features is not None:
-            x = 2 * torch.pi * x @ self.B
-            x = torch.cat([torch.sin(x), torch.cos(x)], axis=-1)
-        if pde_params is not None:
-            x = torch.cat([x, pde_params.detach()], dim=-1)
-        return self.net(x.reshape((1,-1))).reshape((-1))
-    
+        # Apply the network function to the resulting input (batch) tensor and returns
+        return self.net(x)
+ 
     # Concatenates all parameters (weights and biases) of a model into a single 1D tensor.
     def get_weights(self) -> torch.Tensor:
         """
@@ -446,16 +510,18 @@ class Pinn(torch.nn.Module):
 
         Returns
         -------
-        torch.Tensor
+        _torch.Tensor_
             The learnable parameters/weights of the PINN.
         """
         # p.view(-1) flattens each parameter tensor into a 1D tensor
         # torch.cat() concatenates 1D tensors into a single 1D tensor
+
+        # Returns a tensor of aall the learnable parameters of the underlying model
         return torch.cat([param.view(-1) for param in self.parameters() if param.requires_grad])
     
     def derivative(self, order: int, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
         """
-        Compute nth order derivative of the PINN wrt the spatio-temporal input at x.
+        Compute n^th order derivative of the PINN wrt the spatio-temporal input at x.
 
         Parameters
         ----------
@@ -468,82 +534,23 @@ class Pinn(torch.nn.Module):
 
         Returns
         -------
-        torch.Tensor
+        _torch.Tensor_
             The nth order derivative of the PINN at x.
         """
-        # n = number of samples
-        # d = number of input dimensions
-        v = None
-        if pde_params is None:
-            if order == 0:
-                v = self.forward(x) # shape (n)
-                v = vmap(jacrev(self._forward_single))(x)[:, 0, :].squeeze() # shape (n, d)
-                #.squeeze() removes dimensions of size 1: e.g. (1, 3, 1, 5) -> (3, 5)
-            elif order == 2:
-                v = vmap(hessian(self._forward_single))(x)[:, 0, :, :].squeeze() # shape (n, d, d)
-            elif order == 4:
-                f_4th = hessian(hessian(self._forward_single))
-                v = vmap(f_4th)(x)[:, 0, :, :, :, :].squeeze() # shape (n, d, d, d, d)
-        else:
-            if order == 0:
-                v = self.forward(x, pde_params) # shape (n)
-            if order == 1:
-                v = vmap(jacrev(self._forward_single, argnums=0), in_dims=(0, 0))(x, pde_params)[:, 0, :].squeeze() # shape (n, d)
-            elif order == 2:
-                v = vmap(hessian(self._forward_single, argnums=0), in_dims=(0, 0))(x, pde_params)[:, 0, :, :].squeeze() # shape (n, d, d)
-                vxx = v[:, 0, 0]
-                vyy = v[:, 1, 1]
-                vtt = v[:, 2, 2]
-                vxy = v[:, 0, 1]
-                vxt = v[:, 0, 2]
-                vyt = v[:, 1, 2]
-                v = torch.stack([vxx, vyy, vtt, vxy, vxt, vyt], dim=1)
-            elif order == 4:
-                f_4th = hessian(hessian(self._forward_single, argnums=0), argnums=0)
-                v = vmap(f_4th, in_dims=(0, 0))(x, pde_params)[:, 0, :, :, :, :].squeeze() # shape (n, d, d, d, d)
-        
-        if order == 2 and v.dim() < 3:
-            v = v.unsqueeze(0)
-        return v
-    
-    def laplacian(self, order: int, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor: #TODO: test
-        """
-        Compute laplacian of the PINN wrt the spatio-temporal input at x.
-
-        Parameters
-        ----------
-        order : int
-            1 -> Laplacian, 2 -> Laplacian of Laplacian.
-        x : torch.Tensor
-            Spatio-temporal input.
-        pde_params : torch.Tensor
-            PDE parameters in input.
-
-        Returns
-        -------
-        torch.Tensor
-            The Laplacian of the PINN at x.
-        """
-        def lap(x_single):
-            if pde_params is None:
-                H = hessian(self._forward_single)(x_single)
-            else:
-                H = hessian(self._forward_single, argnums=0)(x_single, pde_params)
-
-            return H[0, 0] + H[1, 1]
-        
-        def lap_of_lap(x_single):
-            if pde_params is None:
-                H2 = hessian(lap)(x_single)
-            else:
-                H2 = hessian(lap, argnums=0)(x_single, pde_params)
-            return H2[0, 0] + H2[1, 1]
-
+        if order == 0:
+            return self.forward(x, pde_params)
         if order == 1:
-            v = vmap(lap)(x).squeeze()
-        elif order == 2:   
-            v = vmap(lap_of_lap)(x).squeeze()
-        return v
+            batch_of_gradients = vmap(jacrev(self.forward, argnums=0))(x, pde_params)
+            return batch_of_gradients
+        elif order == 2:
+            batch_of_hessians = vmap(hessian(self.forward, argnums=0))(x, pde_params)
+            Hxx = batch_of_hessians[:, 0, 0]
+            Hyy = batch_of_hessians[:, 1, 1]
+            Htt = batch_of_hessians[:, 2, 2]
+            Hxy = batch_of_hessians[:, 0, 1]
+            Hxt = batch_of_hessians[:, 0, 2]
+            Hyt = batch_of_hessians[:, 1, 2]
+            return torch.stack([Hxx, Hyy, Htt, Hxy, Hxt, Hyt], dim=1)
     
     def _compute_grad_norm(self, loss: torch.Tensor) -> Tuple[Tuple[torch.Tensor, ...], torch.Tensor]:
         """

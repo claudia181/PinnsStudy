@@ -84,9 +84,7 @@ class PhySysDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx) -> dict:
-        item = {}
-        for key in self.cols.keys():
-            item[key] = self.cols[key][idx]
+        item = torch.tensor([self.cols[key][idx] for key in self.cols.keys()])
         return item
     
     # ------------ Public methods ------------
@@ -238,6 +236,9 @@ class PhySysDataset(Dataset):
                 raise ValueError(f"Column {key} not in {self.cols.keys()}.")
             self.cols[key] = torch.cat((self.cols[key], col))
         self.length += dataset.length
+
+    def get_keys(self) -> List[str]:
+        return list(self.cols.keys())
     
     def copy(self) -> Self:
         """

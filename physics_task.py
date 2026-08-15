@@ -106,6 +106,8 @@ class PhysicsTask:
         -------
         _torch.Tensor_
         """
+        if self._lhs is None:
+            raise ValueError(f"No lhs function specified for the task.")
         if input_parameters is None:
             input_parameters = {}
         all_parameters = self.parameters | input_parameters
@@ -148,7 +150,7 @@ class PhysicsTask:
 # ===================================== NeumannBCTask =====================================
 class NeumannBCTask(PhysicsTask):
     """
-    Task for Neumann boundary condiitons.
+    Task for Neumann boundary conditions.
     """
 
     def __init__(self, weight: float = None):
@@ -175,10 +177,10 @@ class NeumannBCTask(PhysicsTask):
     def copy(self) -> Self:
         return NeumannBCTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== DirichletBCTask =====================================
 class DirichletBCTask(PhysicsTask):
     """
-    Task for Dirichlet boundary condiitons.
+    Task for Dirichlet boundary conditions.
     """
 
     def __init__(self, weight: float = None):
@@ -203,10 +205,10 @@ class DirichletBCTask(PhysicsTask):
     def copy(self) -> Self:
         return DirichletBCTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== ICTask =====================================
 class ICTask(PhysicsTask):
     """
-    Task for initial condiitons.
+    Task for initial conditions.
     """
 
     def __init__(self, weight: float = None):
@@ -232,7 +234,7 @@ class ICTask(PhysicsTask):
     def copy(self) -> Self:
         return ICTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== OutputTask =====================================
 class OutputTask(PhysicsTask):
     """
     Task for output learning.
@@ -257,7 +259,7 @@ class OutputTask(PhysicsTask):
     def copy(self) -> Self:
         return OutputTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== DerivativeTask =====================================
 class DerivativeTask(PhysicsTask):
     """
     Task for 1st derivative learning.
@@ -282,7 +284,7 @@ class DerivativeTask(PhysicsTask):
     def copy(self) -> Self:
         return DerivativeTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== SpatialDerivativeTask =====================================
 class SpatialDerivativeTask(PhysicsTask):
     """
     Task for 1st spatial derivative learning.
@@ -307,7 +309,7 @@ class SpatialDerivativeTask(PhysicsTask):
     def copy(self) -> Self:
         return SpatialDerivativeTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== TemporalDerivativeTask =====================================
 class TemporalDerivativeTask(PhysicsTask):
     """
     Task for 1st tempporal derivative learning.
@@ -332,7 +334,7 @@ class TemporalDerivativeTask(PhysicsTask):
     def copy(self) -> Self:
         return TemporalDerivativeTask(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== Derivative2Task =====================================
 class Derivative2Task(PhysicsTask):
     """
     Task for 2nd derivative learning.
@@ -357,7 +359,7 @@ class Derivative2Task(PhysicsTask):
     def copy(self) -> Self:
         return Derivative2Task(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== SpatialDerivative2Task =====================================
 class SpatialDerivative2Task(PhysicsTask):
     """
     Task for 2nd spatial derivative learning.
@@ -382,7 +384,7 @@ class SpatialDerivative2Task(PhysicsTask):
     def copy(self) -> Self:
         return SpatialDerivative2Task(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== TemporalDerivative2Task =====================================
 class TemporalDerivative2Task(PhysicsTask):
     """
     Task for 2nd temporal derivative learning.
@@ -407,7 +409,7 @@ class TemporalDerivative2Task(PhysicsTask):
     def copy(self) -> Self:
         return TemporalDerivative2Task(weight=self.weight)
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== AdvectionReactionDiffusionTask =====================================
 class AdvectionReactionDiffusionTask(PhysicsTask):
     """
     Task for the advection-reaction-diffusion governing equation.
@@ -473,7 +475,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             weight = self.weight
         )
 
-# ===================================== NeumannBCTask =====================================
+# ===================================== StationaryAllenCahnTask =====================================
 class StationaryAllenCahnTask(PhysicsTask):
     """
     Task for the stationary Allen-Cahn governing equation.
