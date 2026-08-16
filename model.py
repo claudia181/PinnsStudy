@@ -14,6 +14,7 @@ from collections import OrderedDict
 from torch.func import vmap, jacrev, hessian
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
+from torch.nn.utils import parameters_to_vector
 from physics_task import PhysicsTask
 from phy_sys_dataset import PhySysDataset
 from typing import Tuple, List, Self
@@ -488,6 +489,10 @@ class Pinn(torch.nn.Module):
             x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
 
         if self.param_input != 0:
+            # Check if pde_params argument has been passsed
+            if pde_params is None:
+                raise ValueError(f"The NN expect {self.param_input} physical system parameters in input, but pde_params = None.")
+            
             # Check if the number of physical system parameters in input is correct
             if pde_params.shape[-1] != self.param_input:
                 raise ValueError(f"The NN expect {self.param_input} physical system parameters in input, but got {pde_params.shape[-1]} instead.")
@@ -496,12 +501,19 @@ class Pinn(torch.nn.Module):
             x = torch.cat([x, pde_params], dim=-1)
 
         # Apply the network function to the resulting input (batch) tensor and returns
-        return self.net(x)
+        ## If x.shape == (1, n_inputs), i.e. x = tensor([[x, y, t]])
+        if len(x.shape) == 2 and x.shape[0] == 1:
+            return self.net(x).flatten() # -> tensor([scalar_pred])
+        
+        ## If x.shape == (n_inputs,) or x.shape == (batch_size > 1, n_inputs)
+        else:
+            return self.net(x).squeeze() # -> tensor(scalar_pred) or tensor([scalar_pred_1, ..., scalar_pred_batch_size])
+            ## For a NN outputing a vector instead of a scalar, the .squeeze() has to be removed.
  
     # Concatenates all parameters (weights and biases) of a model into a single 1D tensor.
     def get_weights(self) -> torch.Tensor:
         """
-        Concatenates all the learnable parameters (weights and biases) 
+        Concatenates an independent copy of all the learnable parameters (weights and biases) 
         of the model into a single 1D tensor and returns it.
 
         Parameters
@@ -511,13 +523,16 @@ class Pinn(torch.nn.Module):
         Returns
         -------
         _torch.Tensor_
-            The learnable parameters/weights of the PINN.
+            An independent copy of the learnable parameters/weights of the PINN.
         """
-        # p.view(-1) flattens each parameter tensor into a 1D tensor
-        # torch.cat() concatenates 1D tensors into a single 1D tensor
+        # Get a tuple of all the learnable parameters of the underlying model
+        learnable_params = (p for p in self.parameters() if p.requires_grad)
 
-        # Returns a tensor of aall the learnable parameters of the underlying model
-        return torch.cat([param.view(-1) for param in self.parameters() if param.requires_grad])
+        # Get an independent copy of the parameters into a 1-dim vector (shape (n_params,))
+        param_vector = parameters_to_vector(learnable_params).clone()
+
+        # Return the vector of parameters
+        return param_vector
     
     def derivative(self, order: int, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
         """
@@ -569,20 +584,25 @@ class Pinn(torch.nn.Module):
         # Compute gradients of loss w.r.t. model parameters
         grads = torch.autograd.grad(
             loss, 
-            self.parameters(), 
-            create_graph=False, 
-            #retain_graph=True, 
-            allow_unused=True
+            self.parameters(),
+            # allow_unused=True,
+            retain_graph=True # retain the graph for a successive call to loss.backward
             )
 
         # Compute total gradient norm (L2)
-        total_norm = torch.norm(torch.stack([g.norm(2) for g in grads if g is not None]))
+        gradient_norm = torch.linalg.norm(torch.stack(grads))
+        #total_norm = torch.linalg.norm(
+        #    torch.stack([
+        #        g.norm(2) ** 2 
+        #        for g in grads if g is not None
+        #        ])
+        #    )
 
         detached_grads = tuple(
-            g.detach() if g is not None else None
+            g.detach() #if g is not None else None
             for g in grads
         )
-        return detached_grads, total_norm.detach()
+        return detached_grads, gradient_norm.detach()
     
     def _compute_cos_sim(self,
         grads_a: Tuple[torch.Tensor, ...],
