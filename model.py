@@ -148,7 +148,10 @@ class Pinn(torch.nn.Module):
         self.param_input = param_input
 
         # Fourier encoding
+        ## Application
         self.ff_encoding = False
+        ## Number of Fourier features
+        self.fourier_features = None
 
         # Total number of input units
         self.input_units = spatial_input + temporal_input + param_input
@@ -172,16 +175,46 @@ class Pinn(torch.nn.Module):
         self.eval_task_list = []
 
         # Elastic weight consolidation
+        ## Application
         self.ewc = False
+        ## Balancing weight of the EWC term in the loss function
+        self.ewc_weight = None
+        ## Authomatic determination of the balancing weight of the EWC term in the loss
+        self.ewc_auto_weighting = None
+        ## Number of training steps to wait before applying EWC regularization
+        self.ewc_warm_up = None
+        ## Decay factor for the EWC weight in the loss
+        self.ewc_decay = None
 
         # Dynamic weight adaptation
+        ## Mode
         self.dwa_mode = "Off"
+        ## Running average factor
+        self.dwa_alpha = None
+        ## Frequency of update of weights
+        self.dwa_moving_avg_frequency = None
+        ## Number of steps to wait before applying the DWA method
+        self.dwa_warm_up = None
+        ## Counter to account for the weights' update frequency
+        self.dwa_moving_avg_count = None
 
         # Conflicts' monitoring
+        ## Application
         self.monitor_conflicts = False
+        ## PhysicsTask wrt which compute the conflicts
+        self.conflict_reference_task = None
+
+        # List of training PhysicsTask
+        self.train_task_list = None
+
+        # List of evaluation PhysicsTask
+        self.train_task_list = None
 
         # Define the loss container: average over all elements of the loss tensor (it always return a scalar in R)
         self.loss_container = nn.MSELoss(reduction='mean')
+
+        # Neural network
+        self.net = None
 
     def _build_net(self) -> None:
         """
@@ -529,7 +562,7 @@ class Pinn(torch.nn.Module):
         learnable_params = (p for p in self.parameters() if p.requires_grad)
 
         # Get an independent copy of the parameters into a 1-dim vector (shape (n_params,))
-        param_vector = parameters_to_vector(learnable_params).clone()
+        param_vector = parameters_to_vector(learnable_params)
 
         # Return the vector of parameters
         return param_vector
@@ -590,85 +623,35 @@ class Pinn(torch.nn.Module):
             )
 
         # Compute total gradient norm (L2)
-        gradient_norm = torch.linalg.norm(torch.stack(grads))
-        #total_norm = torch.linalg.norm(
-        #    torch.stack([
-        #        g.norm(2) ** 2 
-        #        for g in grads if g is not None
-        #        ])
-        #    )
+        gradient_vector = torch.cat([g.detach().flatten() for g in grads])
+        gradient_norm = gradient_vector.norm()
 
-        detached_grads = tuple(
-            g.detach() #if g is not None else None
-            for g in grads
-        )
-        return detached_grads, gradient_norm.detach()
+        return gradient_vector, gradient_norm
     
-    def _compute_cos_sim(self,
-        grads_a: Tuple[torch.Tensor, ...],
-        grads_b: Tuple[torch.Tensor, ...],
-        norm_a: torch.Tensor, 
-        norm_b: torch.Tensor
+    def _update_conflicts(
+        self,
+        task_list: List[PhysicsTask],
+        reference_task: PhysicsTask
         ) -> torch.Tensor:
         """
         Compute the cosine similarity (the cosine of the angle) \n
-        btw the gradients of the losses (gradient wrt the NN parameters/weights).
+        btw the gradients of the losses of each task in `task_list` and the gradient of `reference_task`\n
+        (gradient wrt the NN parameters/weights).\n
+        The variable task.conflict is updated for each task in task_list.
 
         Parameters
         ----------
-        grads_a : tuple[torch.Tensor, ...]
-            Value of the loss gradient vector 'a' on some input.
-        grads_b : tuple[torch.Tensor, ...]
-            Value of the loss gradient vector 'b' on some input.
-        grads_a : tuple[torch.Tensor, ...]
-            Value of the norm of the loss gradient vector 'a'.
-        grads_b : tuple[torch.Tensor, ...]
-            Value of the norm of the loss gradient vector 'b'.
+        task_list : List[Physicstask]
+            List of task for which computing the conflicts.
+        reference_task : PhysicsTask
+            Task wrt the conflicts are computed.
 
         Returns
         -------
-        torch.Tensor
-            The cosine similarity btw gradient a and gradient b.
-        """
-
-        flat_a = []
-        flat_b = []
-
-        for ga, gb in zip(grads_a, grads_b):
-            if ga is None or gb is None:
-                continue
-            flat_a.append(ga.view(-1))
-            flat_b.append(gb.view(-1))
-        
-        flat_a = torch.cat(flat_a)
-        flat_b = torch.cat(flat_b)
-    
-        grad_dot = torch.dot(flat_a, flat_b)
-        cos = grad_dot / (norm_a * norm_b)
-
-        return cos
-    
-    def _compute_ewc_loss_term(self) -> torch.Tensor:
-        """
-        Compute the EWC loss term on the given input.
-
-        Parameters
-        ----------
         None
-
-        Returns
-        -------
-        torch.Tensor
-            Value of the EWC loss term.
         """
-        if not self.ewc:
-            # Compute the loss term
-            ewc_loss = None
-        else:
-            # Compute the loss term
-            ewc_loss = torch.sum(self.ewc_fisher_diag * ((self.get_weights() - self.ewc_objective_weights) ** 2))
-            #print(f"ewc_fisher_diag: {torch.mean(self.ewc_fisher_diag)}\nweights: {torch.mean((self.get_weights() - self.ewc_objective_weights) ** 2)}")
-        return ewc_loss
+        for task in task_list:
+            task.conflict = torch.dot(task.grad, reference_task.grad) / (task.grad_norm * reference_task.grad_norm)
     
     def _update_task_weights(self) -> None:
         """
@@ -686,9 +669,10 @@ class Pinn(torch.nn.Module):
             task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
 
         if self.monitor_conflicts:
-            reference_task = self.train_task_list[self.conflict_reference_task]
-            for task in self.train_task_list:
-                task.conflict = self._compute_cos_sim(task.grad, reference_task.grad, task.grad_norm, reference_task.grad_norm)
+            self._update_conflicts(
+                task_list=self.train_task_list, 
+                reference_task=self.train_task_list[self.conflict_reference_task]
+            )
         
         norm_sum = sum([task.grad_norm for task in self.train_task_list])
         
@@ -716,7 +700,7 @@ class Pinn(torch.nn.Module):
             for task in self.train_task_list:
                 task.weight = task.weight * k / weight_sum
 
-    def _update_grad_norms(self) -> None:
+    def _update_train_grad_norms(self) -> None:
         """
         Update the gradient norm of each objective and the model state accordingly.
 
@@ -732,9 +716,10 @@ class Pinn(torch.nn.Module):
             task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
 
         if self.monitor_conflicts:
-            reference_task = self.train_task_list[self.conflict_reference_task]
-            for task in self.train_task_list:
-                task.conflict = self._compute_cos_sim(task.grad, reference_task.grad, task.grad_norm, reference_task.grad_norm)
+            self._update_conflicts(
+                task_list=self.train_task_list, 
+                reference_task=self.train_task_list[self.conflict_reference_task]
+            )
     
     def _update_eval_grad_norms(self) -> None:
         """
@@ -752,9 +737,10 @@ class Pinn(torch.nn.Module):
             task.grad, task.grad_norm = self._compute_grad_norm(task.loss_value)
 
         if self.monitor_conflicts:
-            reference_task = self.train_task_list[self.conflict_reference_task]
-            for task in self.eval_task_list:
-                task.conflict = self._compute_cos_sim(task.grad, reference_task.grad, task.grad_norm, reference_task.grad_norm)
+            self._update_conflicts(
+                task_list=self.eval_task_list, 
+                reference_task=self.train_task_list[self.conflict_reference_task]
+            )
     
     def train_loss(
             self,
@@ -798,18 +784,17 @@ class Pinn(torch.nn.Module):
             self._update_task_weights()
             self.dwa_moving_avg_count += 1
         else:
-            self._update_grad_norms()
+            self._update_train_grad_norms()
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.train_task_list])
 
         if self.ewc:
             # Compute the loss term
             ewc_loss = torch.sum(self.ewc_fisher_diag * ((self.get_weights() - self.ewc_objective_weights) ** 2))
-            #print(f"ewc_fisher_diag: {torch.mean(self.ewc_fisher_diag)}\nweights: {torch.mean((self.get_weights() - self.ewc_objective_weights) ** 2)}")
-
+            
             if self.ewc_auto_weighting:
                 if self.ewc_warm_up == 0:
-                    self.ewc_weight = (weighted_loss / ewc_loss).item()
+                    self.ewc_weight = (weighted_loss / ewc_loss)#.item()
                     print(f"EWC weight: {self.ewc_weight}")
                     self.ewc_warm_up -= 1
                 elif self.ewc_warm_up > 0:
@@ -819,7 +804,7 @@ class Pinn(torch.nn.Module):
 
             weighted_loss += (self.ewc_weight * ewc_loss)
 
-        return weighted_loss    
+        return weighted_loss
         
     def eval_loss(
             self,
@@ -862,7 +847,6 @@ class Pinn(torch.nn.Module):
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.eval_task_list])
         return weighted_loss
-
 
     def label(
             self, 
@@ -920,7 +904,7 @@ class Pinn(torch.nn.Module):
 
     def get_fisher_diag(
             self, 
-            dataset: TensorDataset, 
+            dataset: PhySysDataset, 
             spacetime_idx: int, 
             param_idx: int, 
             u_idx: int, 
@@ -936,7 +920,7 @@ class Pinn(torch.nn.Module):
 
         Parameters
         ----------
-        dataset : TensorDataset
+        dataset : PhySysDataset
             The dataset object.
 
         Returns
@@ -949,16 +933,16 @@ class Pinn(torch.nn.Module):
         fisher_diag = {name: torch.zeros_like(param).to(self.device).float() for name, param in self.named_parameters() if param.requires_grad}
 
         self.eval()
-        for z in dataloader:
-            x = z[spacetime_idx].to(self.device).float()
-            u = z[u_idx].to(self.device).float()
+        for batch in dataloader:
+            x = batch[:, spacetime_idx].to(self.device).float()
+            u = batch[:, u_idx].to(self.device).float()
 
             params = None
             if self.param_input != 0:
                 if param_subidxs is None:
-                    params = z[param_idx]
+                    params = batch[:, param_idx]
                 else:
-                    params = z[param_idx][:, param_subidxs]
+                    params = batch[:, param_idx, param_subidxs]
 
             self.zero_grad()
 
@@ -969,11 +953,6 @@ class Pinn(torch.nn.Module):
             u_pred = self.forward(x, params)
             per_sample_loss = (u_pred - u) ** 2
             loss = per_sample_loss.mean()
-            #loss = self.loss_fn(
-            #    x=x, pde_params=pde_param_values,
-            #    u=u, du=du, d2u=d2u,
-            #    ge_data=ge_info_dict
-            #)
             loss.backward()
 
             # Accumulate squared gradients
@@ -1003,6 +982,65 @@ class Pinn(torch.nn.Module):
         self.dwa_mode = old_dwa_mode
 
         return fisher_diag_vector
+
+    def get_fisher_diag(
+            self, 
+            dataset: PhySysDataset, 
+            spacetime_key: str = "spacetime", 
+            param_key: str = "param", 
+            u_key: str = "u", 
+            param_subkeys: List[str] = None
+    ) -> torch.Tensor:
+        """
+        Return the vector containing the diagonal of \n
+        the Fisher information matrix \n
+        associated with the model parameters,\n
+        computed on the data in dataset.
+
+        Parameters
+        ----------
+        dataset : PhySysDataset
+            The dataset object.
+
+        Returns
+        -------
+        torch.Tensor
+            The diagonal Fisher information vector.
+        """
+        weights = self.get_weights()
+        fisher_diag = torch.zeros_like(weights).to(self.device).float()
+
+        self.eval()
+
+        x = dataset.cols[spacetime_key]
+        u = dataset.cols[u_key]
+        param_subidxs = [dataset.index(key=param_key, subkey=subkey) for subkey in param_subkeys]
+        params = dataset.cols[param_key]
+        if param_subkeys != None:
+            params = params[:, param_subidxs]
+
+        self.zero_grad()
+
+        old_dwa_mode = self.dwa_mode
+        self.dwa_mode = "Off"
+        self.ewc = False
+
+        u_pred = self.forward(x, params)
+        per_sample_loss = (u_pred - u) ** 2
+        #loss = per_sample_loss.mean()
+
+        for loss in per_sample_loss:
+            loss.backward()
+
+            # Accumulate squared gradients
+            for i, w in enumerate(weights):
+                if w.grad is not None:
+                    fisher_diag[i] += (w.grad ** 2) / len(dataset)
+                    w.grad = None
+
+        self.dwa_mode = old_dwa_mode
+
+        return fisher_diag.detach()
     
     def save(
         self,
