@@ -17,7 +17,7 @@ from torch.utils.data import TensorDataset
 from torch.nn.utils import parameters_to_vector
 from physics_task import PhysicsTask
 from phy_sys_dataset import PhySysDataset
-from typing import Tuple, List, Self
+from typing import Tuple, List, Self, Callable
 import os
 
 EWC_MODES = ["On", "Off"]
@@ -88,7 +88,7 @@ class Pinn(torch.nn.Module):
     ----------------------------
         ewc : bool
             True is EWC regularization is used for training.
-        ewc_objective_weights : torch.Tensor
+        ewc_frictioning_weights : torch.Tensor
             Vector of weights of the EWC model.
         ewc_fisher_diag : torch.Tensor
             Diagonal of the FIM for EWC regularization.
@@ -101,14 +101,47 @@ class Pinn(torch.nn.Module):
         ewc_decay : float
             Decay factor for the EWC term in the loss function.
     """
+    def load_state_dict(self, state_dict, strict = True, assign = False):
+        return super().load_state_dict(state_dict, strict, assign)
     def __init__(
             self,
-            device: str,
-            hidden_units: List[int],
-            activation_str: str = "tanh",
+            device: str = "cpu",
+            activation_function_key: str = "tanh",
             temporal_input: int = 1,
             spatial_input: int = 2,
             param_input: int = 0,
+            hidden_units: List[int] = [],
+
+            ff_encoding: bool = False,
+            B: torch.Tensor = None,
+            fourier_features: int = None,
+            B_gen_frequency_variance: float = None,
+            B_gen_seed: int = 42,
+
+            ewc: bool = False,
+            ewc_weight: float = None,
+            ewc_auto_weighting: bool = False,
+            ewc_warm_up: int = 0, 
+            ewc_decay: float = 1.0,
+            ewc_frictioning_weights: torch.Tensor = None, 
+            ewc_fisher_diagonal: torch.Tensor = None,
+
+            dwa_mode: str = "off", 
+            dwa_alpha: float = None, 
+            dwa_moving_avg_frequency: int = None, 
+            dwa_warm_up: int = None, 
+            dwa_moving_avg_count: int = None,
+
+            train_task_list: List[PhysicsTask] = None,
+            eval_task_list: List[PhysicsTask] = None,
+
+            loss_container: Callable = None,
+            optimizer: torch.optim.Optimizer = None,
+            lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+
+            monitor_conflicts: bool = False,
+            conflict_reference_task: int = None,
+            
             *args,
             **kwargs
         ) -> None:
@@ -118,8 +151,6 @@ class Pinn(torch.nn.Module):
         Parameters
         ----------
         device : str
-        hidden_units : List[int]
-            List of the hidden units of the model.
         activation_str : str
             String identifying the activation function of the network (according to ACTIVATION dict).
         temporal_input : int
@@ -128,6 +159,8 @@ class Pinn(torch.nn.Module):
             Number of spatial dimensions in input.
         param_input : int
             Number of parametrization dimensions in input.
+        hidden_units : List[int]
+            List of the hidden units of the model.
         
         Returns
         -------
@@ -147,12 +180,6 @@ class Pinn(torch.nn.Module):
         # Number of physical system parameters
         self.param_input = param_input
 
-        # Fourier encoding
-        ## Application
-        self.ff_encoding = False
-        ## Number of Fourier features
-        self.fourier_features = None
-
         # Total number of input units
         self.input_units = spatial_input + temporal_input + param_input
 
@@ -160,13 +187,57 @@ class Pinn(torch.nn.Module):
         self.hidden_units = hidden_units
 
         # String identifier of the NN activation function
-        self.activation_str = activation_str
+        self.activation_function_key = activation_function_key
 
-        # NN activation function
-        self.activation = ACTIVATION[activation_str]()
+        # Fourier encoding
+        ## Application
+        self.ff_encoding = ff_encoding
+        if self.ff_encoding:
+            if B is not None:
+                ## Set self.B and self.fourier_features
+                self.set_ff(B=B)
+                self.frequency_variance = None
+            elif fourier_features is None:
+                raise ValueError("ff_encoding = True but both B = None and fourier_features = None.")
+            elif B_gen_frequency_variance is None:
+                raise ValueError("ff_encoding = True but both B = None and B_gen_frequency_variance = None.")
+            else:
+                ## Set self.B, self.fourier_features and self.frequency_variance
+                self.sample_B_and_set_ff(n_fourier_features=fourier_features, frequency_variance=B_gen_frequency_variance, seed=B_gen_seed)
+        else:
+            ## Number of Fourier features
+            self.fourier_features = None
+            ## Variance of sampled frequencies
+            self.frequency_variance = None
+            ## Frequency mtx
+            self.B = None
 
         # Build the network
         self._build_net()
+
+        # Elastic weight consolidation
+        ## Application
+        if ewc:#TODO:check none
+            self.set_ewc(
+                ewc_frictioning_weights=ewc_frictioning_weights,
+                ewc_fisher_diag=ewc_fisher_diagonal,
+                ewc_weight=ewc_weight,
+                ewc_auto_weighting=ewc_auto_weighting,
+                ewc_warm_up=ewc_warm_up,
+                ewc_decay=ewc_decay
+            )
+        ## Balancing weight of the EWC term in the loss function
+        self.ewc_weight = ewc_weight
+        ## Authomatic determination of the balancing weight of the EWC term in the loss
+        self.ewc_auto_weighting = ewc_auto_weighting
+        ## Number of training steps to wait before applying EWC regularization
+        self.ewc_warm_up = ewc_warm_up
+        ## Decay factor for the EWC weight in the loss
+        self.ewc_decay = ewc_decay
+        ## Frictioning weights
+        self.ewc_frictioning_weights = ewc_frictioning_weights
+        ## Fisher diagonal of the frictioning model
+        self.ewc_fisher_diagonal = ewc_fisher_diagonal
 
         # List of training PhysicsTask objects
         self.train_task_list = []
@@ -185,6 +256,12 @@ class Pinn(torch.nn.Module):
         self.ewc_warm_up = None
         ## Decay factor for the EWC weight in the loss
         self.ewc_decay = None
+        ## EWC frequency matrix
+        self.B = None
+        ## Frictioning weights
+        self.ewc_frictioning_weights = None
+        ## Fisher diagonal of the frictioning model
+        self.ewc_fisher_diagonal = None
 
         # Dynamic weight adaptation
         ## Mode
@@ -201,7 +278,7 @@ class Pinn(torch.nn.Module):
         # Conflicts' monitoring
         ## Application
         self.monitor_conflicts = False
-        ## PhysicsTask wrt which compute the conflicts
+        ## Index of the PhysicsTask wrt which compute the conflicts
         self.conflict_reference_task = None
 
         # List of training PhysicsTask
@@ -213,23 +290,21 @@ class Pinn(torch.nn.Module):
         # Define the loss container: average over all elements of the loss tensor (it always return a scalar in R)
         self.loss_container = nn.MSELoss(reduction='mean')
 
-        # Neural network
-        self.net = None
-
     def _build_net(self) -> None:
         """
         Build the NN and save it in the `net` state variable.
         """
         net_dict = OrderedDict()
+        activation = ACTIVATION[self.activation_function_key]()
 
         # First layer
         net_dict['lin0'] = nn.Linear(self.input_units, self.hidden_units[0])
-        net_dict['act0'] = self.activation
+        net_dict['act0'] = activation
 
         # Hidden layers
         for i in range(1, len(self.hidden_units)):
             net_dict[f'lin{i}'] = nn.Linear(in_features=self.hidden_units[i-1], out_features=self.hidden_units[i])
-            net_dict[f'act{i}'] = self.activation
+            net_dict[f'act{i}'] = activation
 
         # Last layer
         net_dict[f'lin{len(self.hidden_units)}'] = nn.Linear(self.hidden_units[-1], 1)
@@ -254,8 +329,8 @@ class Pinn(torch.nn.Module):
         -------
         _None_
         """
-        # Set and register the B frequency mtx in the model state
-        self.register_buffer("B", B) # self.B = B
+        # Set the B frequency matrix
+        self.B = B
 
         # Update the model state
 
@@ -298,8 +373,8 @@ class Pinn(torch.nn.Module):
         # Random generation of the frequency mtx B s.t. it convert the spatio-temporal inputs into n_fourier_features features
         B = torch.randn(2 * (self.spatial_input + self.temporal_input), n_fourier_features) * frequency_variance
 
-        # Set and register the B mtx in the model state
-        self.register_buffer("B", B)
+        # Set the B frequency matrix
+        self.B = B
 
         # Update the model state
         
@@ -364,9 +439,9 @@ class Pinn(torch.nn.Module):
     
     def set_ewc(
             self,
-            ewc_objective_weights: torch.Tensor,
+            ewc_frictioning_weights: torch.Tensor,
             ewc_fisher_diag: torch.Tensor,
-            ewc_weight: float = 1.0,
+            ewc_weight: float,
             ewc_auto_weighting: bool = False,
             ewc_warm_up: int = 0,
             ewc_decay: float = 1.0
@@ -376,10 +451,10 @@ class Pinn(torch.nn.Module):
 
         Parameters
         ----------
-        ewc_objective_weights : torch.Tensor
+        ewc_frictioning_weights : torch.Tensor
             Optimal params of a previous model.
         ewc_fisher_diag : torch.Tensor
-            Diagonal elements of the fisher information matrix relative to ewc_objective_weights,
+            Diagonal elements of the fisher information matrix relative to ewc_frictioning_weights,
             evaluated on some data.
         ewc_weight : float
             Starting weight of the elastic weight consolidation term.
@@ -398,7 +473,7 @@ class Pinn(torch.nn.Module):
         diag_len = len(ewc_fisher_diag)
 
         # Number of optimal weights of the attracting model.
-        n_weights_ewc = len(ewc_objective_weights)
+        n_weights_ewc = len(ewc_frictioning_weights)
 
         # Number of weights of the underlying model
         n_weights = sum(p.numel() for p in self.parameters())
@@ -417,11 +492,11 @@ class Pinn(torch.nn.Module):
         # Authomatic determination of the balancing weight of the EWC term in the loss
         self.ewc_auto_weighting = ewc_auto_weighting
 
-        # Set and register the attracting model weights in the model state
-        self.register_buffer("ewc_objective_weights", ewc_objective_weights)
+        # Set the frictioning model weights
+        self.ewc_frictioning_weights = ewc_frictioning_weights
 
-        # Set and register the Fisher diagonal in the model state
-        self.register_buffer("ewc_fisher_diag", ewc_fisher_diag)
+        # Set the Fisher diagonal
+        self.ewc_fisher_diagonal = self.ewc_fisher_diagonal
 
         # Number of training steps to wait before applying EWC regularization
         self.ewc_warm_up = ewc_warm_up
@@ -790,7 +865,7 @@ class Pinn(torch.nn.Module):
 
         if self.ewc:
             # Compute the loss term
-            ewc_loss = torch.sum(self.ewc_fisher_diag * ((self.get_weights() - self.ewc_objective_weights) ** 2))
+            ewc_loss = torch.sum(self.ewc_fisher_diag * ((self.get_weights() - self.ewc_frictioning_weights) ** 2))
             
             if self.ewc_auto_weighting:
                 if self.ewc_warm_up == 0:
@@ -905,91 +980,10 @@ class Pinn(torch.nn.Module):
     def get_fisher_diag(
             self, 
             dataset: PhySysDataset, 
-            spacetime_idx: int, 
-            param_idx: int, 
-            u_idx: int, 
-            #du_idx: int, 
-            #d2u_idx: int, 
-            param_subidxs: List[int] = None
-    ) -> torch.Tensor:
-        """
-        Return the vector containing the diagonal of \n
-        the Fisher information matrix \n
-        associated with the model parameters,\n
-        computed on the data in dataset.
-
-        Parameters
-        ----------
-        dataset : PhySysDataset
-            The dataset object.
-
-        Returns
-        -------
-        torch.Tensor
-            The diagonal Fisher information vector.
-        """
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
-
-        fisher_diag = {name: torch.zeros_like(param).to(self.device).float() for name, param in self.named_parameters() if param.requires_grad}
-
-        self.eval()
-        for batch in dataloader:
-            x = batch[:, spacetime_idx].to(self.device).float()
-            u = batch[:, u_idx].to(self.device).float()
-
-            params = None
-            if self.param_input != 0:
-                if param_subidxs is None:
-                    params = batch[:, param_idx]
-                else:
-                    params = batch[:, param_idx, param_subidxs]
-
-            self.zero_grad()
-
-            old_dwa_mode = self.dwa_mode
-            self.dwa_mode = "Off"
-            self.ewc = False
-
-            u_pred = self.forward(x, params)
-            per_sample_loss = (u_pred - u) ** 2
-            loss = per_sample_loss.mean()
-            loss.backward()
-
-            # Accumulate squared gradients
-            for name, param in self.named_parameters():
-                if param.grad is not None:
-                    fisher_diag[name] += (param.grad.detach() ** 2) #* len(x))#TODO
-            #for name, param in self.named_parameters():
-            #    if param.grad is not None:
-            #        fisher_diag[name] += (param.grad ** 2).detach()
-
-        # Normalize by total number of samples
-        for name in fisher_diag:
-            fisher_diag[name] /= (len(dataset))
-        ## Average over all samples
-        #num_batches = len(dataloader)
-        #for name in fisher_diag:
-        #    fisher_diag[name] /= num_batches
-
-        # Get diagonal Fisher information vector
-        fisher_diag_vector = torch.cat([
-            fisher_diag[name].view(-1) # .view(-1): flatten all into one dimention
-            for name, param in self.named_parameters() if param.requires_grad
-        ])
-
-        #fisher_diag_vector /= torch.mean(fisher_diag_vector)
-
-        self.dwa_mode = old_dwa_mode
-
-        return fisher_diag_vector
-
-    def get_fisher_diag(
-            self, 
-            dataset: PhySysDataset, 
             spacetime_key: str = "spacetime", 
             param_key: str = "param", 
-            u_key: str = "u", 
-            param_subkeys: List[str] = None
+            param_subkeys: List[str] = None, 
+            u_key: str = "u"
     ) -> torch.Tensor:
         """
         Return the vector containing the diagonal of \n
@@ -1001,16 +995,25 @@ class Pinn(torch.nn.Module):
         ----------
         dataset : PhySysDataset
             The dataset object.
+        spacetime_key : str
+            Key of the spatio-temporal coordinate column.
+        param_key : str 
+            Key of the physical system parameter vector column.
+        param_subkeys : List[str]
+            Subkeys of the entries physical system parameter vector which are given in input to the model.
+        u_key : str
+            Key of the unknown field column.
 
         Returns
         -------
         torch.Tensor
             The diagonal Fisher information vector.
         """
+        self.eval()
+        self.zero_grad()
+
         weights = self.get_weights()
         fisher_diag = torch.zeros_like(weights).to(self.device).float()
-
-        self.eval()
 
         x = dataset.cols[spacetime_key]
         u = dataset.cols[u_key]
@@ -1019,10 +1022,9 @@ class Pinn(torch.nn.Module):
         if param_subkeys != None:
             params = params[:, param_subidxs]
 
-        self.zero_grad()
-
         old_dwa_mode = self.dwa_mode
         self.dwa_mode = "Off"
+        old_ewc = self.ewc
         self.ewc = False
 
         u_pred = self.forward(x, params)
@@ -1038,7 +1040,9 @@ class Pinn(torch.nn.Module):
                     fisher_diag[i] += (w.grad ** 2) / len(dataset)
                     w.grad = None
 
+        self.zero_grad()
         self.dwa_mode = old_dwa_mode
+        self.ewc = old_ewc
 
         return fisher_diag.detach()
     
@@ -1058,8 +1062,6 @@ class Pinn(torch.nn.Module):
         -------
         None
         """
-
-        Pinn
         checkpoint = {
             "model_state_dict": self.state_dict(),
 
@@ -1071,7 +1073,7 @@ class Pinn(torch.nn.Module):
 
             "input_units": self.input_units,
             "hidden_units": self.hidden_units,
-            "activation_str": self.activation_str,
+            "activation_function_key": self.activation_function_key,
 
             "ff_encoding": self.ff_encoding,
             "dwa_mode": self.dwa_mode,
@@ -1096,10 +1098,40 @@ class Pinn(torch.nn.Module):
             checkpoint["ewc_auto_weighting"] = self.ewc_auto_weighting
             checkpoint["ewc_warm_up"] = self.ewc_warm_up
             checkpoint["ewc_decay"] = self.ewc_decay
-            # self.ewc_objective_weights and self.ewc_fisher_diag are registered in model_state_dict
 
         # Save the checkpoint dictionary
         torch.save(checkpoint, filepath)
+
+    def get_extra_state(self):
+        return {
+            "device": self.device,
+            "temporal_input": self.temporal_input,
+            "spatial_input": self.spatial_input,
+            "param_input": self.param_input,
+            "ff_encoding": self.ff_encoding,
+            "fourier_features": self.fourier_features,
+            "input_units": self.input_units,
+            "hidden_units": self.hidden_units,
+            "activation_function_key": self.activation_function_key,
+            "train_task_list": self.train_task_list,
+            "eval_task_list": self.eval_task_list,
+            "ewc": self.ewc,
+            "ewc_weighting": self.ewc_weighting,
+            "ewc_auto_weighting": self.ewc_auto_weighting,
+            "ewc_warm_up": self.ewc_warm_up,
+            "ewc_decay": self.ewc_decay,
+            "B": self.B,
+            "ewc_frictioning_weights": self.ewc_frictioning_weights,
+            "ewc_fisher_diagonal": self.ewc_fisher_diagonal,
+            "dwa_mode": self.dwa_mode,
+            "dwa_alpha": self.dwa_alpha,
+            "dwa_moving_avg_frequency": self.dwa_moving_avg_frequency,
+            "dwa_warm_up": self.dwa_warm_up,
+            "dwa_moving_avg_count": self.dwa_moving_avg_count,
+            "monitor_conflicts": self.monitor_conflicts,
+            "conflict_reference_task": self.conflict_reference_task,
+            "loss_container": self.loss_container
+        }
 
     @staticmethod
     def load(filepath: str) -> Self:
@@ -1130,7 +1162,7 @@ class Pinn(torch.nn.Module):
             )
         if checkpoint["ewc"]:
             model.set_ewc(
-                ewc_objective_weights=checkpoint["ewc_objective_weights"],
+                ewc_frictioning_weights=checkpoint["ewc_frictioning_weights"],
                 ewc_fisher_diag=checkpoint["ewc_fisher_diag"],
                 ewc_weight=checkpoint["ewc_weight"],
                 ewc_auto_weighting=checkpoint["ewc_auto_weighting"],

@@ -18,7 +18,7 @@ from derivatives_computation import derivative
 from collections import deque
 import numpy as np
 
-def stream_spacetime_samples(v_slice: int, nt: int, n_samples: int, seed: int = 42, device: str = "cpu") -> List[torch.Tensor[int]]:
+def stream_spacetime_samples(v_slice: int, nt: int, n_samples: int, seed: int = 42, device: str = "cpu") -> List[torch.Tensor]:
     """
     Sample `n_samples` uniform random indexes along an `nt`-long stream of frames.\n
     Each frame is a grid of `v_slice` points and any index correspond to a point.
