@@ -147,6 +147,27 @@ class PhysicsTask:
             weight = self.weight
         )
 
+    def state_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "parameters": self.parameters,
+            "weight": self.weight,
+            "grad": self.grad,
+            "grad_norm": self.grad_norm,
+            "conflict": self.conflict,
+            "loss_value": self.loss_value
+        }
+
+    def load_state(self, state: dict) -> None:
+        if self.id != state["id"]:
+            raise TypeError(f"Physics task type mismatch: {self.id} != {state['id']}.")
+        self.parameters = state["parameters"]
+        self.weight = state["weight"]
+        self.grad = state["grad"]
+        self.grad_norm = state["grad_norm"]
+        self.conflict = state["conflict"]
+        self.loss_value = state["loss_value"]
+
 # ===================================== NeumannBCTask =====================================
 class NeumannBCTask(PhysicsTask):
     """
@@ -420,7 +441,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             velocity: Callable,
             weight: float = None
     ):
-        self.parameters = parameters
+        #self.parameters = parameters
         self.velocity = velocity
 
         def lhs(

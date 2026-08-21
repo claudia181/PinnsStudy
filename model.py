@@ -126,21 +126,20 @@ class Pinn(torch.nn.Module):
             ewc_frictioning_weights: torch.Tensor = None, 
             ewc_fisher_diagonal: torch.Tensor = None,
 
-            dwa_mode: str = "off", 
+            dwa_mode: str = "Off", 
             dwa_alpha: float = None, 
             dwa_moving_avg_frequency: int = None, 
-            dwa_warm_up: int = None, 
-            dwa_moving_avg_count: int = None,
+            dwa_warm_up: int = None,
 
-            train_task_list: List[PhysicsTask] = None,
-            eval_task_list: List[PhysicsTask] = None,
-
-            loss_container: Callable = None,
-            optimizer: torch.optim.Optimizer = None,
-            lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+            train_task_list: List[PhysicsTask] = [],
+            eval_task_list: List[PhysicsTask] = [],
 
             monitor_conflicts: bool = False,
             conflict_reference_task: int = None,
+
+            #loss_container: Callable = None,
+            optimizer: torch.optim.Optimizer = None,
+            lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
             
             *args,
             **kwargs
@@ -190,12 +189,12 @@ class Pinn(torch.nn.Module):
         self.activation_function_key = activation_function_key
 
         # Fourier encoding
-        ## Application
         self.ff_encoding = ff_encoding
         if self.ff_encoding:
             if B is not None:
                 ## Set self.B and self.fourier_features
                 self.set_ff(B=B)
+                ## Variance of sampled frequencies
                 self.frequency_variance = None
             elif fourier_features is None:
                 raise ValueError("ff_encoding = True but both B = None and fourier_features = None.")
@@ -207,8 +206,10 @@ class Pinn(torch.nn.Module):
         else:
             ## Number of Fourier features
             self.fourier_features = None
+
             ## Variance of sampled frequencies
             self.frequency_variance = None
+
             ## Frequency mtx
             self.B = None
 
@@ -216,79 +217,74 @@ class Pinn(torch.nn.Module):
         self._build_net()
 
         # Elastic weight consolidation
-        ## Application
-        if ewc:#TODO:check none
-            self.set_ewc(
-                ewc_frictioning_weights=ewc_frictioning_weights,
-                ewc_fisher_diag=ewc_fisher_diagonal,
-                ewc_weight=ewc_weight,
-                ewc_auto_weighting=ewc_auto_weighting,
-                ewc_warm_up=ewc_warm_up,
-                ewc_decay=ewc_decay
-            )
-        ## Balancing weight of the EWC term in the loss function
-        self.ewc_weight = ewc_weight
-        ## Authomatic determination of the balancing weight of the EWC term in the loss
-        self.ewc_auto_weighting = ewc_auto_weighting
-        ## Number of training steps to wait before applying EWC regularization
-        self.ewc_warm_up = ewc_warm_up
-        ## Decay factor for the EWC weight in the loss
-        self.ewc_decay = ewc_decay
-        ## Frictioning weights
-        self.ewc_frictioning_weights = ewc_frictioning_weights
-        ## Fisher diagonal of the frictioning model
-        self.ewc_fisher_diagonal = ewc_fisher_diagonal
+        ## This set self.ewc, self.ewc_weight, self.ewc_auto_weighting, 
+        ## self.ewc_warm_up, self.ewc_decay, self.ewc_frictioning_weights, 
+        ## self.ewc_fisher_diagonal
+        self.set_ewc(
+            ewc_on=ewc,
 
-        # List of training PhysicsTask objects
-        self.train_task_list = []
+            ## Frictioning weights
+            ewc_frictioning_weights=ewc_frictioning_weights,
 
-        # List of evaluation PhysicsTask objects
-        self.eval_task_list = []
+            ## Fisher diagonal of the frictioning model
+            ewc_fisher_diag=ewc_fisher_diagonal,
 
-        # Elastic weight consolidation
-        ## Application
-        self.ewc = False
-        ## Balancing weight of the EWC term in the loss function
-        self.ewc_weight = None
-        ## Authomatic determination of the balancing weight of the EWC term in the loss
-        self.ewc_auto_weighting = None
-        ## Number of training steps to wait before applying EWC regularization
-        self.ewc_warm_up = None
-        ## Decay factor for the EWC weight in the loss
-        self.ewc_decay = None
-        ## EWC frequency matrix
-        self.B = None
-        ## Frictioning weights
-        self.ewc_frictioning_weights = None
-        ## Fisher diagonal of the frictioning model
-        self.ewc_fisher_diagonal = None
+            ## Balancing weight of the EWC term in the loss function
+            ewc_weight=ewc_weight,
 
+            ## Authomatic determination of the balancing weight of the EWC term in the loss
+            ewc_auto_weighting=ewc_auto_weighting,
+
+            ## Number of training steps to wait before applying EWC regularization
+            ewc_warm_up=ewc_warm_up,
+
+            ## Decay factor for the EWC weight in the loss
+            ewc_decay=ewc_decay
+        )
+        
         # Dynamic weight adaptation
-        ## Mode
-        self.dwa_mode = "Off"
-        ## Running average factor
-        self.dwa_alpha = None
-        ## Frequency of update of weights
-        self.dwa_moving_avg_frequency = None
-        ## Number of steps to wait before applying the DWA method
-        self.dwa_warm_up = None
-        ## Counter to account for the weights' update frequency
-        self.dwa_moving_avg_count = None
+        ## This set self.dwa_mode, self.dwa_alpha, self.dwa_moving_avg_frequency, 
+        ## self.dwa_warm_up, self.dwa_moving_avg_count
+        self.set_dwa(
+            ## Mode
+            dwa_mode=dwa_mode,
+
+            ## Running average factor
+            dwa_alpha=dwa_alpha,
+
+            ## Frequency of update of weights
+            dwa_moving_avg_frequency=dwa_moving_avg_frequency,
+
+            ## Number of steps to wait before applying the DWA method
+            dwa_warm_up=dwa_warm_up
+        )
+
+        # Set of tasks on which the PINN is trained,
+        # a of PhysicsTask objects (the training objectives).
+        self.train_task_list = train_task_list
+
+        # Set of tasks on which the PINN is evaluated, 
+        # a list of PhysicsTask objects (the ones on which evaluation metrics are collected).
+        self.eval_task_list = eval_task_list
 
         # Conflicts' monitoring
-        ## Application
-        self.monitor_conflicts = False
-        ## Index of the PhysicsTask wrt which compute the conflicts
-        self.conflict_reference_task = None
+        ## This set self.monitor_conflicts and self.conflict_reference_task
+        self.set_conflict_monitoring(
+            ## Conflict monitoring activation
+            monitor_conflicts=monitor_conflicts,
 
-        # List of training PhysicsTask
-        self.train_task_list = None
-
-        # List of evaluation PhysicsTask
-        self.train_task_list = None
+            ## Index of the PhysicsTask wrt which compute the conflicts
+            conflict_reference_task=conflict_reference_task
+        )
 
         # Define the loss container: average over all elements of the loss tensor (it always return a scalar in R)
         self.loss_container = nn.MSELoss(reduction='mean')
+
+        # The optimizer
+        self.optimizer = optimizer
+
+        # The learning rate scheduler 
+        self.lr_scheduler = lr_scheduler
 
     def _build_net(self) -> None:
         """
@@ -396,9 +392,9 @@ class Pinn(torch.nn.Module):
     def set_dwa(
             self,
             dwa_mode: str,
-            dwa_alpha: float = 0.9,
-            dwa_moving_avg_frequency: int = 1,
-            dwa_warm_up: int = 0,
+            dwa_alpha: float = None, #0.9,
+            dwa_moving_avg_frequency: int = None, #1,
+            dwa_warm_up: int = None#0,
     ) -> None:
         """
         Set the dynamic weight adaptation schema.
@@ -421,27 +417,42 @@ class Pinn(torch.nn.Module):
         # Check the available DWA modes
         if dwa_mode not in DWA_MODES:
             raise ValueError(f"Parameter 'dwa_mode' must be in {DWA_MODES}, not {dwa_mode}.")
+        if dwa_mode == "Off":
+            self.dwa_mode = dwa_mode
+            self.dwa_alpha = None
+            self.dwa_moving_avg_frequency = None
+            self.dwa_warm_up = None
+            self.dwa_moving_avg_count = None
+        else:
+            # Check None values
+            if dwa_alpha is None:
+                raise ValueError(f"dwa_alpha cannot be None.")
+            elif dwa_moving_avg_frequency is None:
+                raise ValueError(f"dwa_moving_avg_frequency cannot be None.")
+            elif dwa_warm_up is None:
+                raise ValueError(f"dwa_warm_up cannot be None.")
         
-        # DWA method
-        self.dwa_mode = dwa_mode
+            # DWA method
+            self.dwa_mode = dwa_mode
 
-        # DWA running average factor
-        self.dwa_alpha = dwa_alpha
+            # DWA running average factor
+            self.dwa_alpha = dwa_alpha
 
-        # Frequency of update of weights
-        self.dwa_moving_avg_frequency = dwa_moving_avg_frequency
+            # Frequency of update of weights
+            self.dwa_moving_avg_frequency = dwa_moving_avg_frequency
 
-        # Number of steps to wait before applying the DWA method
-        self.dwa_warm_up = dwa_warm_up
+            # Number of steps to wait before applying the DWA method
+            self.dwa_warm_up = dwa_warm_up
 
-        # Counter to account for the weights' update frequency
-        self.dwa_moving_avg_count = 0
+            # Counter to account for the weights' update frequency
+            self.dwa_moving_avg_count = 0
     
     def set_ewc(
             self,
-            ewc_frictioning_weights: torch.Tensor,
-            ewc_fisher_diag: torch.Tensor,
-            ewc_weight: float,
+            ewc_on: bool,
+            ewc_frictioning_weights: torch.Tensor = None,
+            ewc_fisher_diag: torch.Tensor = None,
+            ewc_weight: float = None,
             ewc_auto_weighting: bool = False,
             ewc_warm_up: int = 0,
             ewc_decay: float = 1.0
@@ -451,6 +462,8 @@ class Pinn(torch.nn.Module):
 
         Parameters
         ----------
+        ewc_on : bool
+            True if EWC has to be applied.
         ewc_frictioning_weights : torch.Tensor
             Optimal params of a previous model.
         ewc_fisher_diag : torch.Tensor
@@ -469,48 +482,71 @@ class Pinn(torch.nn.Module):
         -------
         _None_
         """
-        # Size of the diagonal of the Fisher information matrix
-        diag_len = len(ewc_fisher_diag)
+        if not ewc_on:
+            self.ewc_weight = None
+            self.ewc_auto_weighting = None
+            self.ewc_frictioning_weights = None
+            self.ewc_fisher_diagonal = None
+            self.ewc_warm_up = None
+            self.ewc_decay = None
+            self.ewc = False
+        else:
+            # Check for None values
+            if ewc_frictioning_weights is None:
+                raise ValueError(f"ewc_frictioning_weights cannot be None.")
+            elif ewc_fisher_diag is None:
+                raise ValueError(f"ewc_fisher_diag cannot be None.")
+            elif ewc_weight is None:
+                raise ValueError(f"ewc_weight cannot be None.")
+            elif ewc_auto_weighting is None:
+                raise ValueError(f"ewc_auto_weighting cannot be None.")
+            elif ewc_warm_up is None:
+                raise ValueError(f"ewc_warm_up cannot be None.")
+            elif ewc_decay is None:
+                raise ValueError(f"ewc_decay cannot be None.")
 
-        # Number of optimal weights of the attracting model.
-        n_weights_ewc = len(ewc_frictioning_weights)
+            # Size of the diagonal of the Fisher information matrix
+            diag_len = len(ewc_fisher_diag)
 
-        # Number of weights of the underlying model
-        n_weights = sum(p.numel() for p in self.parameters())
+            # Number of optimal weights of the attracting model.
+            n_weights_ewc = len(ewc_frictioning_weights)
 
-        # Check if the number of items in the Fisher diagonal match the number of weights of the attracting model
-        if diag_len != n_weights_ewc:
-            raise ValueError(f"The diagonal of the Fisher information ({diag_len} elements) must have many elements as the number parameters of the EWC model ({n_weights_ewc}).")
+            # Number of weights of the underlying model
+            n_weights = sum(p.numel() for p in self.parameters())
 
-        # Check if the number of items in the Fisher diagonal match the number of weights of the underlying model
-        if diag_len != n_weights:
-            raise ValueError(f"The diagonal of the Fisher information ({diag_len} elements) must have many elements as the number parameters of the model ({n_weights}).")
+            # Check if the number of items in the Fisher diagonal match the number of weights of the attracting model
+            if diag_len != n_weights_ewc:
+                raise ValueError(f"The diagonal of the Fisher information ({diag_len} elements) must have many elements as the number parameters of the EWC model ({n_weights_ewc}).")
 
-        # Balancing weight of the EWC term in the loss function
-        self.ewc_weight = ewc_weight
+            # Check if the number of items in the Fisher diagonal match the number of weights of the underlying model
+            if diag_len != n_weights:
+                raise ValueError(f"The diagonal of the Fisher information ({diag_len} elements) must have many elements as the number parameters of the model ({n_weights}).")
 
-        # Authomatic determination of the balancing weight of the EWC term in the loss
-        self.ewc_auto_weighting = ewc_auto_weighting
+            # Balancing weight of the EWC term in the loss function
+            self.ewc_weight = ewc_weight
 
-        # Set the frictioning model weights
-        self.ewc_frictioning_weights = ewc_frictioning_weights
+            # Authomatic determination of the balancing weight of the EWC term in the loss
+            self.ewc_auto_weighting = ewc_auto_weighting
 
-        # Set the Fisher diagonal
-        self.ewc_fisher_diagonal = self.ewc_fisher_diagonal
+            # Set the frictioning model weights
+            self.ewc_frictioning_weights = ewc_frictioning_weights
 
-        # Number of training steps to wait before applying EWC regularization
-        self.ewc_warm_up = ewc_warm_up
+            # Set the Fisher diagonal
+            self.ewc_fisher_diagonal = self.ewc_fisher_diagonal
 
-        # Decay factor for the EWC weight in the loss
-        self.ewc_decay = ewc_decay
+            # Number of training steps to wait before applying EWC regularization
+            self.ewc_warm_up = ewc_warm_up
 
-        # Apply EWC
-        self.ewc = True
+            # Decay factor for the EWC weight in the loss
+            self.ewc_decay = ewc_decay
+
+            # Apply EWC
+            self.ewc = True
 
     def set_conflict_monitoring(
             self,
             monitor_conflicts: bool,
-            conflict_reference_task: int = 0
+            conflict_reference_task: int = None
     ) -> None:
         """
         Set the monitoring of training gradient conflicts.
@@ -530,46 +566,15 @@ class Pinn(torch.nn.Module):
         # Apply conflict monitoring
         self.monitor_conflicts = monitor_conflicts
 
+        # Check that conflict_reference_task is not None if conflict monitoring is active
+        if monitor_conflicts:
+            if conflict_reference_task is None:
+                raise ValueError(f"conflict_reference_task cannot be None.")
+            elif conflict_reference_task >= len(self.train_task_list):
+                raise ValueError(f"conflict_reference_task cannot be >= len(self.train_task_list): {conflict_reference_task} >= {len(self.train_task_list)}.")
+        
         # PhysicsTask wrt which compute the conflicts
         self.conflict_reference_task = conflict_reference_task
-    
-    def set_train_tasks(
-            self,
-            train_task_list: List[PhysicsTask]
-    ) -> None:
-        """
-        Set the tasks on which the PINN is trained.
-
-        Parameters
-        ----------
-        train_task_list : List[PhysicsTask]
-            List of PhysicsTask objects (the training objectives).
-        
-        Returns
-        -------
-        _None_
-        """
-        # List of training PhysicsTask
-        self.train_task_list = train_task_list
-
-    def set_eval_tasks(
-            self,
-            eval_task_list: List[PhysicsTask]
-    ) -> None:
-        """
-        Set the tasks on which the PINN is evaluated.
-
-        Parameters
-        ----------
-        eval_task_list : List[PhysicsTask]
-            List of PhysicsTask objects (the ones on which evaluation metrics are collected).
-        
-        Returns
-        -------
-        _None_
-        """
-        # List of evaluation PhysicsTask
-        self.eval_task_list = eval_task_list
 
     # Forward function for batches of data
     def forward(self, x: torch.Tensor, pde_params: torch.Tensor = None) -> torch.Tensor:
@@ -1102,7 +1107,7 @@ class Pinn(torch.nn.Module):
         # Save the checkpoint dictionary
         torch.save(checkpoint, filepath)
 
-    def get_extra_state(self):
+    def get_extra_state(self) -> dict:
         return {
             "device": self.device,
             "temporal_input": self.temporal_input,
@@ -1113,10 +1118,9 @@ class Pinn(torch.nn.Module):
             "input_units": self.input_units,
             "hidden_units": self.hidden_units,
             "activation_function_key": self.activation_function_key,
-            "train_task_list": self.train_task_list,
-            "eval_task_list": self.eval_task_list,
+            "train_task_list": [task.state_dict() for task in self.train_task_list],
+            "eval_task_list": [task.state_dict() for task in self.eval_task_list],
             "ewc": self.ewc,
-            "ewc_weighting": self.ewc_weighting,
             "ewc_auto_weighting": self.ewc_auto_weighting,
             "ewc_warm_up": self.ewc_warm_up,
             "ewc_decay": self.ewc_decay,
@@ -1130,8 +1134,75 @@ class Pinn(torch.nn.Module):
             "dwa_moving_avg_count": self.dwa_moving_avg_count,
             "monitor_conflicts": self.monitor_conflicts,
             "conflict_reference_task": self.conflict_reference_task,
-            "loss_container": self.loss_container
+            "loss_container": self.loss_container.__class__.__name__,
+            "optimizer": {self.optimizer.__class__.__name__: self.optimizer.state_dict()},
+            "lr_scheduler": {self.lr_scheduler.__class__.__name__: self.lr_scheduler.state_dict()}
         }
+
+    def set_extra_state(self, state: dict) -> None:
+        self.device = state["device"]
+        self.temporal_input = state["temporal_input"]
+        self.spatial_input = state["spatial_input"]
+        self.param_input = state["param_input"]
+        self.ff_encoding = state["ff_encoding"]
+        self.fourier_features = state["fourier_features"]
+        self.input_units = state["input_units"]
+        self.hidden_units = state["hidden_units"]
+        self.activation_function_key = state["activation_function_key"]
+        #self.train_task_list
+        #self.eval_task_list
+        self.ewc = state["ewc"]
+        self.ewc_auto_weighting = state["ewc_auto_weighting"]
+        self.ewc_warm_up = state["ewc_warm_up"]
+        self.ewc_decay = state["ewc_decay"]
+        self.B = state["B"]
+        self.ewc_frictioning_weights = state["ewc_frictioning_weights"]
+        self.ewc_fisher_diagonal = state["ewc_fisher_diagonal"]
+        self.dwa_mode = state["dwa_mode"]
+        self.dwa_alpha = state["dwa_alpha"]
+        self.dwa_moving_avg_frequency = state["dwa_moving_avg_frequency"]
+        self.dwa_warm_up = state["dwa_warm_up"]
+        #self.dwa_moving_avg_count
+        self.monitor_conflicts = state["monitor_conflicts"]
+        self.conflict_reference_task = state["conflict_reference_task"]
+        #self.loss_container
+
+        if self.optimizer is not None:
+            optimizer_class = self.optimizer.__class__.__name__
+            if optimizer_class == state["optimizer"].keys()[0]:
+                self.optimizer.load_state_dict(state["optimizer"][optimizer_class])
+            else:
+                raise TypeError(f"Different optimizer class: {optimizer_class} != {state["optimizer"].keys()[0]}.")
+            
+        if self.lr_scheduler is not None:
+            lr_scheduler_class = self.lr_scheduler.__class__.__name__
+            if lr_scheduler_class == state["lr_scheduler"].keys()[0]:
+                self.lr_scheduler.load_state_dict(state["lr_scheduler"][lr_scheduler_class])
+            else:
+                raise TypeError(f"Different lr_scheduler class: {lr_scheduler_class} != {state["lr_scheduler"].keys()[0]}.")
+
+
+    @staticmethod
+    def load(
+        filepath: str,
+        optimizer: torch.optim.Optimizer = None,
+        lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None
+    ) -> Self:
+        # Check the filepath existence
+        if not os.path.exists(filepath):
+            raise ValueError(f"File '{filepath}' not found.")
+
+        # Load the state dictionary of the checkpoint model
+        checkpoint = torch.load(filepath, weights_only=False)
+
+        # Initialize an empty-state PINN model
+        model = Pinn(optimizer=optimizer, lr_scheduler=lr_scheduler)
+
+        # Load the checkpoint state into the model
+        model.load_state_dict(checkpoint)
+
+        # Move the model into the checkpoint device
+        #model.to(checkpoint["device"])
 
     @staticmethod
     def load(filepath: str) -> Self:
