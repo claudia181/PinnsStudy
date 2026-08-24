@@ -30,7 +30,7 @@ Moreover any physics task has associated the following attributes:
 
 from typing import Callable
 import torch
-from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion, null_velocity_field
 from StationaryAllenCahn.allen_cahn import AllenCahn
 from model import Pinn
 from typing import List, Self
@@ -71,45 +71,29 @@ class PhysicsTask:
         self.conflict = None
         self.loss_value = None
 
-    def residual(self) -> torch.Tensor | None:
-        return None
-
     def loss(self) -> torch.Tensor | None:
+        """
+        Loss function giving the loss term for the task.
+        """
         return None
     
     def loss_required_labels(self) -> List[str]:
         """
         Function returning the keys of the set of labels necessary to compute the loss term of the task.
-
-        Parameters
-        ----------
-        _None_
-
-        Returns
-        -------
-        _List_[_str_]
         """
         return []
     
     def copy(self) -> Self:
         """
         Copy function.
-
-        Parameters
-        ----------
-        _None_
-
-        Returns
-        -------
-        _PhysicsTask_
         """
-        return PhysicsTask(
-            task_id = self.id,
-            parameters = self.parameters,
-            weight = self.weight
-        )
+        task = PhysicsTask()
+        task.load_state(self.state_dict())
 
     def state_dict(self) -> dict:
+        """
+        Function to get the state dictionary of the object.
+        """
         return {
             "id": self.id,
             "parameters": self.parameters,
@@ -121,6 +105,14 @@ class PhysicsTask:
         }
 
     def load_state(self, state: dict) -> None:
+        """
+        Function to load a state into the object.
+
+        Parameters
+        ----------
+        state : dict
+            The dictionary of the state to load.
+        """
         if self.id != state["id"]:
             raise TypeError(f"Physics task type mismatch: {self.id} != {state['id']}.")
         self.parameters = state["parameters"]
@@ -129,6 +121,33 @@ class PhysicsTask:
         self.grad_norm = state["grad_norm"]
         self.conflict = state["conflict"]
         self.loss_value = state["loss_value"]
+
+    @staticmethod
+    def load(state: dict, **kwargs) -> Self:
+        if state["id"] == "NeumannBC":
+            return NeumannBCTask().load_state(state)
+        elif state["id"] == "DirichletBC":
+            return DirichletBCTask().load_state(state)
+        elif state["id"] == "IC":
+            return ICTask().load_state(state)
+        elif state["id"] == "Output":
+            return OutputTask().load_state(state)
+        elif state["id"] == "Derivative":
+            return DerivativeTask().load_state(state)
+        elif state["id"] == "Derivative_x":
+            return SpatialDerivativeTask().load_state(state)
+        elif state["id"] == "Derivative_t":
+            return TemporalDerivativeTask().load_state(state)
+        elif state["id"] == "Derivative2":
+            return Derivative2Task().load_state(state)
+        elif state["id"] == "Derivative2_x":
+            return SpatialDerivative2Task().load_state(state)
+        elif state["id"] == "Derivative2_t":
+            return TemporalDerivative2Task().load_state(state)
+        elif state["id"] == "AdvectionReactionDiffusionGE":
+            return AdvectionReactionDiffusionTask(velocity=kwargs["velocity"]).load_state(state)
+        elif state["id"] == "StationaryAllenCahnGE":
+            return StationaryAllenCahnTask().load_state(state)
 
 # ===================================== NeumannBCTask =====================================
 class NeumannBCTask(PhysicsTask):
@@ -143,19 +162,35 @@ class NeumannBCTask(PhysicsTask):
         )
 
     def out_flux(self, du: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
+        """
+        Function returning the outward flux through the boundary of the spatial domain: 
+        - component of the gradient field du along the outward normal field to the boundary surface.
+        """
         outward_flux = (du[:, :2] * n).sum(dim=1)
         return outward_flux
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted outward flux and the wanted outward flux.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         du_pred = model.derivative(order=1, x=x, pde_params=input_params)
         return mse_loss(self.out_flux(du=du_pred, n=n), self.out_flux(du=du, n=n))
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["du", "n"]
     
     def copy(self) -> Self:
-        return NeumannBCTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = NeumannBCTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== DirichletBCTask =====================================
 class DirichletBCTask(PhysicsTask):
@@ -164,22 +199,33 @@ class DirichletBCTask(PhysicsTask):
     """
 
     def __init__(self, weight: float = None):
-        
         super().__init__(
             task_id="DirichletBC",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted boundary value and the wanted boundary value.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         u_pred = model.forward(x=x, pde_params=input_params)
         return mse_loss(u_pred, u)
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["u"]
     
     def copy(self) -> Self:
-        return DirichletBCTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = DirichletBCTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== ICTask =====================================
 class ICTask(PhysicsTask):
@@ -188,22 +234,33 @@ class ICTask(PhysicsTask):
     """
 
     def __init__(self, weight: float = None):
-        
         super().__init__(
             task_id="IC",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted initial state field and the wanted initial state field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         u_pred = model.forward(x=x, pde_params=input_params)
         return mse_loss(u_pred, u)
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["u"]
     
     def copy(self) -> Self:
-        return ICTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = ICTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== OutputTask =====================================
 class OutputTask(PhysicsTask):
@@ -219,15 +276,27 @@ class OutputTask(PhysicsTask):
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted u field and the wanted u field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         u_pred = model.forward(x=x, pde_params=input_params)
         return mse_loss(u_pred, u)
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["u"]
     
     def copy(self) -> Self:
-        return OutputTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = OutputTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== DerivativeTask =====================================
 class DerivativeTask(PhysicsTask):
@@ -236,22 +305,33 @@ class DerivativeTask(PhysicsTask):
     """
 
     def __init__(self, weight: float = None):
-        
         super().__init__(
             task_id="Derivative",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted du field and the wanted du field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         du_pred = model.derivative(order=1, x=x, pde_params=input_params)
         return mse_loss(du_pred, du)
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["du"]
     
     def copy(self) -> Self:
-        return DerivativeTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = DerivativeTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== SpatialDerivativeTask =====================================
 class SpatialDerivativeTask(PhysicsTask):
@@ -260,22 +340,33 @@ class SpatialDerivativeTask(PhysicsTask):
     """
 
     def __init__(self, weight: float = None):
-        
         super().__init__(
             task_id="Derivative_x",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted du_xy field and the wanted du_xy field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         du_pred = model.derivative(order=1, x=x, pde_params=input_params)
         return mse_loss(du_pred[:, :2], du[:, :2])
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["du"]
     
     def copy(self) -> Self:
-        return SpatialDerivativeTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = SpatialDerivativeTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== TemporalDerivativeTask =====================================
 class TemporalDerivativeTask(PhysicsTask):
@@ -283,23 +374,34 @@ class TemporalDerivativeTask(PhysicsTask):
     Task for 1st tempporal derivative learning.
     """
 
-    def __init__(self, weight: float = None):
-        
+    def __init__(self, weight: float = None): 
         super().__init__(
             task_id="Derivative_t",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted du_t field and the wanted du_t field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         du_pred = model.derivative(order=1, x=x, pde_params=input_params)
         return mse_loss(du_pred[:, 2:], du[:, 2:])
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["du"]
     
     def copy(self) -> Self:
-        return TemporalDerivativeTask(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = TemporalDerivativeTask()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== Derivative2Task =====================================
 class Derivative2Task(PhysicsTask):
@@ -308,22 +410,33 @@ class Derivative2Task(PhysicsTask):
     """
 
     def __init__(self, weight: float = None):
-        
         super().__init__(
             task_id="Derivative2",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted d2u field and the wanted d2u field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
         return mse_loss(d2u_pred, d2u)
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["d2u"]
     
     def copy(self) -> Self:
-        return Derivative2Task(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = Derivative2Task()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== SpatialDerivative2Task =====================================
 class SpatialDerivative2Task(PhysicsTask):
@@ -332,22 +445,33 @@ class SpatialDerivative2Task(PhysicsTask):
     """
 
     def __init__(self, weight: float = None):
-
         super().__init__(
             task_id="Derivative2_x",
             weight=weight
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted [d2u_xx, d2u_yy, d2u_xy] field and the wanted [d2u_xx, d2u_yy, d2u_xy] field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
         return mse_loss(d2u_pred[:, :2], d2u[:, :2]) # mse_loss(d2u_pred[:, :2, :2], d2u[:, :2, :2])
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["d2u"]
     
     def copy(self) -> Self:
-        return SpatialDerivative2Task(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = SpatialDerivative2Task()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== TemporalDerivative2Task =====================================
 class TemporalDerivative2Task(PhysicsTask):
@@ -363,15 +487,27 @@ class TemporalDerivative2Task(PhysicsTask):
         )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted d2u_tt field and the wanted d2u_tt field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
         d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
         return mse_loss(d2u_pred[:, 2], d2u[:, 2]) # mse_loss(d2u_pred[:, 2, 2], d2u[:, 2, 2])
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return ["d2u"]
     
     def copy(self) -> Self:
-        return TemporalDerivative2Task(weight=self.weight)
+        """
+        Copy function.
+        """
+        task = TemporalDerivative2Task()
+        task.load_state(self.state_dict())
+        return task
 
 # ===================================== AdvectionReactionDiffusionTask =====================================
 class AdvectionReactionDiffusionTask(PhysicsTask):
@@ -379,13 +515,29 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
     Task for the advection-reaction-diffusion governing equation.
     """
 
-    def __init__(self, 
-            parameters: dict,
-            velocity: Callable,
+    def __init__(self,
+            velocity: Callable = None,
+            source: Callable = None,
+            implicit_source: str = None,
+            implicit_source_parameters: dict = {},
+            D: float = None,
             weight: float = None
     ):
-        self.parameters = parameters
-        self.velocity = velocity
+        self.velocity_fn = velocity
+        self.velocity_vectors = None
+
+        self.source_fn = source
+        self.source_values = None
+
+        if implicit_source is not None and \
+            (implicit_source_parameters is None or \
+            "A" not in implicit_source_parameters.keys() or \
+            "B" not in implicit_source_parameters.keys()):
+
+            raise ValueError(f"Implicit source {implicit_source} needs 'A' and 'B' parameters, but implicit_source_parameters is {implicit_source_parameters}.")
+        
+        self.parameters = {"D": D, "implicit_source": implicit_source} | implicit_source_parameters
+
         super().__init__(
             task_id="AdvectionReactionDiffusionGE",
             parameters=self.parameters,
@@ -418,10 +570,16 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
         """
         if input_parameters is None:
             input_parameters = {}
+        #TODO: functions to set source_values and velocity_vectors
+
         all_parameters = self.parameters | input_parameters
         return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **all_parameters)
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted PDE residual field and the null field.
+        """
         u = model.derivative(order=0, x=x, pde_params=input_params)
         du = model.derivative(order=1, x=x, pde_params=input_params)
         d2u = model.derivative(order=2, x=x, pde_params=input_params)
@@ -431,19 +589,24 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
         v = self.velocity(x_, y, t)
         mse_loss = torch.nn.MSELoss(reduction='mean')
         input_param_dict = dict(zip(model.pde_params_in_input, input_params.T))
-        input_param_dict["v"] = v
+        input_param_dict["velocity"] = v
         residual_value = self.residual(u=u, du=du, d2u=d2u, input_parameters=input_param_dict)
         return mse_loss(residual_value, torch.zeros_like(residual_value))
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return []
 
     def copy(self) -> Self:
-        return AdvectionReactionDiffusionTask(
-            parameters = self.parameters,
-            velocity = self.velocity,
-            weight = self.weight
-        )
+        """
+        Copy function.
+        """
+        task = AdvectionReactionDiffusionTask()
+        task.load_state(self.state_dict())
+        task.velocity = self.velocity
+        return task
 
 # ===================================== StationaryAllenCahnTask =====================================
 class StationaryAllenCahnTask(PhysicsTask):
@@ -451,12 +614,11 @@ class StationaryAllenCahnTask(PhysicsTask):
     Task for the stationary Allen-Cahn governing equation.
     """
 
-    def __init__(self, parameters: dict, weight: float = None):
-        self.parameters = parameters
+    def __init__(self, parameters: dict = None, weight: float = None):
 
         super().__init__(
             task_id="StationaryAllenCahnGE",
-            parameters=self.parameters,
+            parameters=parameters,
             weight=weight
         )
 
@@ -487,6 +649,10 @@ class StationaryAllenCahnTask(PhysicsTask):
         return AllenCahn.residual(u=u, d2u=d2u, **all_parameters)
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted PDE residual field and the null field.
+        """
         mse_loss = torch.nn.MSELoss(reduction='mean')
     
         u = model.derivative(order=0, x=x, pde_params=input_params)
@@ -497,10 +663,15 @@ class StationaryAllenCahnTask(PhysicsTask):
         return mse_loss(residual_value, torch.zeros_like(residual_value))
     
     def loss_required_labels(self) -> List[str]:
+        """
+        Function returning the keys of the set of labels necessary to compute the loss term of the task.
+        """
         return []
     
     def copy(self) -> Self:
-        return StationaryAllenCahnTask(
-            parameters = self.parameters,
-            weight = self.weight
-        )
+        """
+        Copy function.
+        """
+        task = StationaryAllenCahnTask()
+        task.load_state(self.state_dict())
+        return task

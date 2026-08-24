@@ -1149,8 +1149,8 @@ class Pinn(torch.nn.Module):
         self.input_units = state["input_units"]
         self.hidden_units = state["hidden_units"]
         self.activation_function_key = state["activation_function_key"]
-        #self.train_task_list
-        #self.eval_task_list
+        #self.train_task_list = 
+        #self.eval_task_list =
         self.ewc = state["ewc"]
         self.ewc_auto_weighting = state["ewc_auto_weighting"]
         self.ewc_warm_up = state["ewc_warm_up"]

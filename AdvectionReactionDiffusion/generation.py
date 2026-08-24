@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import ConcatDataset
 from phy_sys_dataset import PhySysDataset
 from typing import Callable, Set
-from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion, null_source, null_velocity_field
 from phy_sys_dataset import PhySysDataset
 from data_utils import get_uniform, get_grid
 from typing import Tuple, List
@@ -71,11 +71,6 @@ def help_ic() -> None:
     """)
 
 def generate_AdvectionReactionDiffusion(
-        velocity: Callable,
-        diffusion_coeff: float,
-        source: Callable,
-        implicit_source: Callable,
-
         shape: str,
         spatial_region: dict,
         bc: dict,
@@ -87,6 +82,11 @@ def generate_AdvectionReactionDiffusion(
 
         n_samples: int,
         seed: int = 42,
+
+        velocity: Callable = None,
+        diffusion_coeff: float = None,
+        source: Callable = None,
+        implicit_source: Callable = None,
 
         include_diffusion_coeff: bool = False,
         include_velocity_values: bool = False,
@@ -105,6 +105,15 @@ def generate_AdvectionReactionDiffusion(
         cmap: str = "inferno",
         figsize: tuple = (3.5, 3.5)
 ) -> PhySysDataset:
+
+    if velocity is None:
+        velocity = null_velocity_field()
+    if source is None:
+        source = null_source()
+    if implicit_source is None:
+        implicit_source = null_source()
+    if diffusion_coeff is None:
+        diffusion_coeff = 0.0
 
     pde = AdvectionReactionDiffusion(
         velocity = velocity,

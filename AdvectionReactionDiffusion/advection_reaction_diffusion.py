@@ -187,6 +187,9 @@ def constant_source(
     
     return source
 
+def null_source() -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    return constant_source()
+
 def decaying_surce(
         sigma: float = 1.0,
         center: tuple = (0.0, 0.0),
@@ -459,6 +462,13 @@ def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.
 
     raise ValueError(f"Unknown field '{field}'")
 
+
+def null_velocity_field() -> Callable[[np.ndarray, np.ndarray, float], np.ndarray]:
+    """
+    Returns a null velocity vector field.
+    """
+    return velocity_field(field="rotation_expansion", alpha_mode="const", alpha=0.0, beta_mode="const", beta=0.0)
+
 # ===================================== AdvectionReactionDiffusion class =====================================
 class AdvectionReactionDiffusion:
     """
@@ -555,22 +565,17 @@ class AdvectionReactionDiffusion:
         """
         # Set the velocity field
         if velocity is None:
-            self.v = velocity_field(
-                rotation_mode="const", 
-                radial_expansion_mode="const", 
-                rotation_weight=1.0, 
-                radial_expansion_weight=0.0
-                )
+            self.v = null_velocity_field()
         else:
             self.v = velocity
 
         # Set the source field
         if source is None:
-            self.s = constant_source()
+            self.s = null_source()
         else:
             self.s = source
         if implicit_source is None:
-            self.i_s = constant_source()
+            self.i_s = null_source()
         else:
             self.i_s = implicit_source
         
@@ -1001,15 +1006,15 @@ class AdvectionReactionDiffusion:
     @classmethod
     def residual(
         cls,
-        u: torch.Tensor,
         du: torch.Tensor,
         d2u: torch.Tensor,
-        v: torch.Tensor,
-        D: float,
+        D: torch.Tensor = None,
+        velocity: torch.Tensor = None,
         source: torch.Tensor = None,
         implicit_source: str = None,
-        A: float = 1.0,
-        B: float = 1.0
+        u: torch.Tensor = None,
+        A: torch.Tensor = None,
+        B: torch.Tensor = None
         ) -> torch.Tensor:
         """
         Compute the residual for the governing equation of the system.
@@ -1059,15 +1064,23 @@ class AdvectionReactionDiffusion:
         uyy = d2u[:, 1] # d2u[:, 1, 1]
         # utt = d2u[:, 2, 2]
 
-        vx = v[:, 0]
-        vy = v[:, 1]
-
-        diffusion_term = D * (uxx + uyy)
-
-        if source is not None:
-            source_term = source
+        if velocity is None:
+            vx = 0.0
+            vy = 0.0
         else:
+            vx = velocity[:, 0]
+            vy = velocity[:, 1]
+
+        if D is None:
+            diffusion_term = 0.0
+        else:
+            diffusion_term = D * (uxx + uyy)
+
+        if source is None:
             source_term = 0.0
+        else:
+            source_term = source
+
         if implicit_source == "AllenCahn":
             implicit_source_term = A * (u ** 3 - u)
         elif implicit_source == "logistic":
