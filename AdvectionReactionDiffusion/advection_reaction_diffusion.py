@@ -9,19 +9,10 @@ Spatio-temporal domain:
 - 2-dimentional spatial domain
 
 Functions:
-- `source_field`
-- For creating explicit source fields:
-    - `constant_source`
-    - `decaying_source`
-    - `oscillating_source`
-    - `temporary_source`
-- For creating implicit source fields:
-    - `logistic_source`
-    - `allen_cahn_source`
-    - `arrhenius_source`
 - `velocity_field`
 
 Classes:
+- `Source` (For creating explicit or implicit scalar source fields)
 - `AdvectionReactionDiffusion`.
 """
 
@@ -32,343 +23,373 @@ import matplotlib.pyplot as plt
 from typing import Callable, Any, List, Tuple, Set
 from trajectory import Trajectory
 
-def source_field(
-        sigma: float = 1.0,
-        center: tuple = (0.0, 0.0),
-        mode: str = "constant",
-        amp: float = 0.0,
-        delta: float = 0.1,
-        period: float = 5.0,
-        A: float = 0.0,
-        B: float = 0.0
-        ) -> Callable[[np.ndarray, np.ndarray, float, np.ndarray], float]:
+class Source:
     """
-    Build a scalar source function s(x, y, t, u) with values in R.
+    Class for source functions involved in the reaction process.
 
-    Gaussian sources s(x, y, t) =
-        - amp * f(t) * G(x, y)
-        - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) )
-        - f(t) =
-            - 1 (constant)
-            - e^(- delta * t) (decay)
-            - sin((2 pi / period) * t) (oscillate)
-            - (t < period) (temporary)
-    Sources s(u) =
-        - A * u^2 - B * u (logistic)
-        - A * (u^3 - u) (AllenCahn)
-        - A * e^(- B / u) (Arrhenius)
+    Maps vector-type object into scalars (producing a scalar field):
+    - Callable[[np.ndarray, ..., np.ndarray], np.ndarray],
+    - Callable[[torch.Tensor, ..., torch.Tensor], torch.Tensor].
 
-    Parameters
+    The input of the source function can be the spatio-temporal coordinates (or a subset of them) or the scalar field `u` (implicit sources).
+
+    Attributes
     ----------
     mode : str
-        Source function type identifier:
-        - "constant": s(x, y) = amp * G(x, y)
-        - "decay": s(x, y, t) = amp * e^(- delta * t) * G(x, y)
-        - "oscillate": s(x, y, t) = amp * sin((2 pi / period) * t) * G(x, y)
-        - "temporary": s(x, y, t) = amp * (t < period) * G(x, y)
-        - "logistic": s(u) = A * u^2 - B * u
-        - "AllenCahn": s(u) = A * (u^3 - u)
-        - "Arrhenius": s(u) = A * e^(- B / u)
+        The type of source: 'constant', 'decay', 'periodic', 'temporary', 'logistic', 'AllenCahn', 'Arrhenius'.
     sigma : float
-        Standard deviation of the Gaussian.
-    center : tuple
-        Center (xc, yc) of the Gaussian.
+        Std dev of the gaussian bump of the source.
+    center : Tuple[float, float]
+        Center of the gaussian bump of the source.
     amp : float
-        For Gaussian-type sources: s(x, y, t) = amp * f(t) * G(x, y).
+        Amplitude of the gaussian bump of the source.
     delta : float
-        For mode = "decay", the decay rate: f(t) = e^(- delta * t).
+        Decay factor for decaying sources.
     period : float
-        - For mode = "oscillate": f(t) = sin(2 * pi / period * t).
-        - For mode = "temporary": f(t) = (t < period).
+        Period for periodic sources.
     A : float
-        - For mode = "logistic": s(u) = A * u^2 - B * u
-        - For mode = "AllenCahn": s(u) = A * (u^3 - u)
-        - For mode = "Arrhenius": s(u) = A * e^(- B / u)
+        Parameter for implicit sources 'logistic', 'AllenCahn' or 'Arrhenius'.
     B : float
-        - For mode = "logistic": s(u) = A * u^2 - B * u
-        - For mode = "Arrhenius": s(u) = A * e^(- B / u)
-
-    Returns
-    -------
-    Callable
-        A source function s(x, y, t, u).
+        Parameter for implicit sources 'logistic' or 'Arrhenius'.
+    fn : Callable
+        The source function applied:
+        - 'constant': s(x, y) = amp * G(x, y)
+        - 'decay': s(x, y, t) = amp * e^(- delta * t) * G(x, y)
+        - 'periodic': s(x, y, t) = amp * sin((2 pi / period) * t) * G(x, y)
+        - 'temporary': s(x, y, t) = amp * (t < period) * G(x, y)
+        - 'logistic': s(u) = A * u^2 - B * u
+        - 'AllenCahn': s(u) = A * (u^3 - u)
+        - 'Arrhenius': s(u) = A * e^(- B / u)
     """
-    if sigma is None: sigma = 1.0
-    if center is None: center = (0.0, 0.0)
-    xc, yc = center
-    if xc is None: xc = 0.0
-    if yc is None: yc = 0.0
-    if mode is None: mode = "constant"
-    if amp is None: amp = 0.0
-    if delta is None: delta = 0.1
-    if period is None: period = 5.0
-
-    def G(x, y): # Gaussian spot
-        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
-
-    if mode == "constant":
-        # Constant source
-        def source(x, y, t = None, u = None):
-            return amp * G(x, y)
+    def __init__(
+            self,
+            mode: str,
+            sigma: float = None,
+            center: Tuple[float, float] = None,
+            amp: float = None,
+            delta: float = None,
+            period: float = None,
+            A: float = None,
+            B: float = None
+    ) -> None:
+        """
+        Constructor: build a scalar source function with state s(x, y, t, u) with values in R.
         
-    elif mode == "decay":
-        # Decaying source
-        def source(x, y, t, u = None):
-            return amp * np.exp(- delta * t) * G(x, y)
+        Gaussian sources s(x, y, t) =
+            - amp * f(t) * G(x, y)
+            - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) )
+            - f(t) =
+                - 1 (constant)
+                - e^(- delta * t) (decay)
+                - sin((2 pi / period) * t) (periodic)
+                - (t < period) (temporary)
+        Sources s(u) =
+            - A * u^2 - B * u (logistic)
+            - A * (u^3 - u) (AllenCahn)
+            - A * e^(- B / u) (Arrhenius)
         
-    elif mode == "oscillate":
-        w = 2 * np.pi / period
-        # Oscillating source
-        def source(x, y, t, u = None):
-            return amp * np.sin(w * t) * G(x, y)
+        Parameters
+        ----------
+        mode : str
+            Source function type identifier:
+            - "constant": s(x, y) = amp * G(x, y)
+            - "decay": s(x, y, t) = amp * e^(- delta * t) * G(x, y)
+            - "oscillate": s(x, y, t) = amp * sin((2 pi / period) * t) * G(x, y)
+            - "temporary": s(x, y, t) = amp * (t < period) * G(x, y)
+            - "logistic": s(u) = A * u^2 - B * u
+            - "AllenCahn": s(u) = A * (u^3 - u)
+            - "Arrhenius": s(u) = A * e^(- B / u)
+        sigma : float
+            Standard deviation of the Gaussian.
+        center : tuple
+            Center (xc, yc) of the Gaussian.
+        amp : float
+            For Gaussian-type sources: s(x, y, t) = amp * f(t) * G(x, y).
+        delta : float
+            For mode = "decay", the decay rate: f(t) = e^(- delta * t).
+        period : float
+            - For mode = "oscillate": f(t) = sin(2 * pi / period * t).
+            - For mode = "temporary": f(t) = (t < period).
+        A : float
+            - For mode = "logistic": s(u) = A * u^2 - B * u
+            - For mode = "AllenCahn": s(u) = A * (u^3 - u)
+            - For mode = "Arrhenius": s(u) = A * e^(- B / u)
+        B : float
+            - For mode = "logistic": s(u) = A * u^2 - B * u
+            - For mode = "Arrhenius": s(u) = A * e^(- B / u)
     
-    elif mode == "temporary":
-        # Temporary source
-        def source(x, y, t, u = None):
-            return amp * G(x, y) * (t < period)
+        Returns
+        -------
+        _None_
+        """
+        self._check_configuration(mode=mode, amp=amp, delta=delta, period=period, A=A, B=B)
 
-    elif mode == "logistic":
-        # Logistic source
-        def source(x = None, y = None, t = None, u = None):
-            if u is None:
-                raise TypeError(f"Logistic source missing 1 required argument: 'u'.")
-            return A * u**2 - B * u
-    
-    elif mode == "AllenCahn":
-        # Allen-Cahn-type source
-        def source(x = None, y = None, t = None, u = None):
-            if u is None:
-                raise TypeError(f"AllenCahn source missing 1 required argument: 'u'.")
-            return A * (u**3 - u)
+        self.sigma = sigma
+        self.center = center
+        self.mode = mode
+        self.amp = amp
+        self.delta = delta
+        self.period = period
+        self.A = A
+        self.B = B
+        self.fn = self._get_source_fn()
+
+    def _check_configuration(
+            self,
+            mode: str,
+            amp: float,
+            delta: float,
+            period: float,
+            A: float,
+            B: float
+    ) -> None:
+        """
+        Check the acceptability of a configuration.
+        """
+        if mode in ["constant", "decay", "periodic", "temporary"]:
+            self._is_implicit = False
+        elif mode in ["logistic", "AllenCahn", "Arrhenius"]:
+            self._is_implicit = True
+        else:
+            raise ValueError(f"Argument 'mode' must be 'constant'|'decay'|'periodic'|'temporary'|'logistic'|'AllenCahn'|'Arrhenius', not {mode}.")
+        
+        if not self._is_implicit:
+            if amp is None:
+                raise ValueError(f"Explicit source function requires to specify the amp parameter (amplitude).")
+            if mode == "decay" and delta is None:
+                raise ValueError(f"Decaying source function requires to specify the delta parameter (decay factor).")
+            if mode == "periodic" and period is None:
+                raise ValueError(f"Periodic source function requires to specify the period parameter (signal period).")
+            if mode == "temporary" and period is None:
+                raise ValueError(f"Temporary source function requires to specify the period parameter (signal duration).")
+        else:
+            if A is None:
+                raise ValueError(f"Implicit source function requires to specify the A parameter.")
+            if B is None and mode != "AllenCahn":
+                raise ValueError(f"Implicit source function requires to specify the B parameter.")
+
+    def _get_source_fn(self) -> Callable:
+        """
+        Returns the source function corresponding to the state of the object.
+        """
+        if self.mode == "constant":
+            # Constant source
+            def source_fn(x, y, **kwargs):
+                if x is None or y is None:
+                    raise ValueError(f"A constant source requires spatial coordinates: x = {x}, y = {y}.")
+                return self.amp * self._G(x, y) 
+                    
+        elif self.mode == "decay":
+            def source_fn(x, y, t, **kwargs):
+                # Decaying source
+                if x is None or y is None or t is None:
+                    raise ValueError(f"A decaying source requires spatio-temporal coordinates: x = {x}, y = {y}, t = {t}.")
+                return self.amp * np.exp(- self.delta * t) * self._G(x, y)
+                    
+        elif self.mode == "periodic":
+            # Periodic source
+            def source_fn(x, y, t, **kwargs):
+                if x is None or y is None or t is None:
+                    raise ValueError(f"A periodic source requires spatio-temporal coordinates: x = {x}, y = {y}, t = {t}.")       
+                w = 2 * np.pi / self.period
+                return self.amp * np.sin(w * t) * self._G(x, y)
+                
+        elif self.mode == "temporary":
+            # Temporary source
+            def source_fn(x, y, t, **kwargs):
+                if x is None or y is None or t is None:
+                    raise ValueError(f"A temporary source requires spatio-temporal coordinates: x = {x}, y = {y}, t = {t}.")
+                return self.amp * self._G(x, y) * (t < self.period)
             
-    elif mode == "Arrhenius":
-        # Arrhenius-type source
-        def source(x = None, y = None, t = None, u = None):
-            if u is None:
-                raise TypeError(f"Arrhenius source missing 1 required argument: 'u'.")
-            return A * np.exp(- B / u)
+        elif self.mode == "logistic":
+            # Logistic source
+            def source_fn(u, x = None, y = None, t = None):    
+                if u is None:
+                    raise TypeError(f"A logistic source requires 'u'.")
+                return self.A * u ** 2 - self.B * u
+                
+        elif self.mode == "AllenCahn":
+            # Allen-Cahn-type source
+            def source_fn(u, **kwargs):
+                if u is None:
+                    raise TypeError(f"An AllenCahn source requires 'u'.")
+                return self.A * (u ** 3 - u)
+                        
+        elif self.mode == "Arrhenius":
+            # Arrhenius-type source
+            def source_fn(u, **kwargs):
+                if u is None:
+                    raise TypeError(f"An Arrhenius source requires 'u'.")
+                return self.A * np.exp(- self.B / u)
+
+        return source_fn
+
+    def _G(# Gaussian spot
+            self,
+            x: np.ndarray | torch.Tensor, 
+            y: np.ndarray | torch.Tensor
+    ) -> np.ndarray | torch.Tensor:
+        """
+        Gaussian bump at (x, y).
+        """
+        xc, yc = self.center
+        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * self.sigma ** 2))
+
+    def __call__(
+            self,
+            x: np.ndarray | torch.Tensor = None,
+            y: np.ndarray | torch.Tensor = None,
+            t: np.ndarray | torch.Tensor = None,
+            u: np.ndarray | torch.Tensor = None
+    ) -> np.ndarray | torch.Tensor:
+        """
+        Call funcction.
+        """
+        return self.fn(x=x, y=y, t=t, u=u)
+
+    def state_dict(self) -> dict:
+        """
+        Returns the state dictionary of the object.
+        """
+        return {
+            "mode": self.mode,
+            "amp": self.amp,
+            "center": self.center,
+            "sigma": self.sigma,
+            "delta": self.delta,
+            "period": self.period,
+            "A": self.A,
+            "B": self.B
+        }
+
+    def load_state(self, state: dict):
+        """
+        Loads the given state into the object.
+        """
+        self._check_configuration(
+            mode=state["mode"], 
+            amp=state["amp"], 
+            delta=state["delta"], 
+            period=state["period"], 
+            A=state["A"], 
+            B=state["B"]
+        )
+        self.mode = state["mode"]
+        self.amp = state["amp"]
+        self.center = state["center"]
+        self.sigma = state["sigma"]
+        self.delta = state["delta"]
+        self.period = state["period"]
+        self.A = state["A"]
+        self.B = state["B"]
+
+    def mode_view(self) -> dict:
+        """
+        Returns a dictionary of the object state taking part in the call process (the interesting pieces for the current mode).
+        """
+        if self.mode == "constant":
+            return {
+                "mode": self.mode, 
+                "amp": self.amp
+            }
         
-    else:
-        raise ValueError(f"Argument 'mode' must be 'constant'|'decay'|'oscillate'|'temporary'|'logistic'|'AllenCahn'|'Arrhenius', not {mode}.")
+        elif self.mode == "decay":
+            return {
+                "mode": self.mode, 
+                "amp": self.amp,
+                "center": self.center,
+                "sigma": self.sigma,
+                "delta": self.delta
+            }
+        elif self.mode == "periodic" or self.mode == "temporary":
+            return {
+                "mode": self.mode, 
+                "amp": self.amp,
+                "center": self.center,
+                "sigma": self.sigma,
+                "period": self.period
+            }
+                    
+        elif self.mode == "logistic" or self.mode == "Arrhenius":
+            return {
+                "mode": self.mode, 
+                "A": self.A,
+                "B": self.B
+            }
+                        
+        elif self.mode == "AllenCahn":
+            return {
+                "mode": self.mode, 
+                "A": self.A
+            }
 
-    return source
+# A null source
+null_source = Source(
+    mode="constant",
+    center=(0.0, 0.0),
+    amp=0.0
+)
 
-def constant_source(
-        sigma: float = 1.0,
-        center: tuple = (0.0, 0.0),
-        amp: float = 0.0
-        ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    """
-    Returns a constant-in-time source function:
-    - s(x, y, t, u) = amp * G(x, y),
-    - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
 
-    Parameters
-    ----------
-    sigma : float
-        Standard deviation of the Gaussian.
-    center : tuple
-        Center (xc, yc) of the Gaussian.
-    amp : float
-        Constant multiplicative coefficient of the Gaussian.
+class Velocity:
+    def __init__(
+            self,
+            rotation_weight: float = None,
+            radial_expansion_weight: float = None,
+            rotation_mode: str = None,
+            radial_expansion_mode: str = None,
+            rotation_frequency: float = None,
+            radial_expansion_frequency: float = None,
+            rotation_decay_factor: float = None,
+            radial_expansion_decay_factor: float = None
+    ) -> None:
+        self.rotation_weight = rotation_weight
+        self.radial_expansion_weight = radial_expansion_weight
+        self.rotation_mode = rotation_mode # in {"const", "sin", "exp"}
+        self.radial_expansion_mode = radial_expansion_mode # in {"const", "sin", "exp"}
+        self.rotation_frequency = rotation_frequency
+        self.radial_expansion_frequency = radial_expansion_frequency
+        self.rotation_decay_factor = rotation_decay_factor
+        self.radial_expansion_decay_factor = radial_expansion_decay_factor
 
-    Returns
-    -------
-    Callable
-        Constant-in-time source function s(x, y) = amp * G(x, y).
-    """
-    xc, yc = center
+        self.a
 
-    def G(x, y): # Gaussian spot
-        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
-    
-    def source(x, y, t):
-        return amp * G(x, y)
-    
-    return source
+    # Law for evolving the coefficients of the velocity vecrtor components
+    def _coefficient_law(
+            self, 
+            mode: str, 
+            weight: float = None, 
+            frequency: float = None, 
+            decay_factor: float = None
+    ) -> Callable:
+        """
+        Parameters
+        ----------
+        mode : str
+            Scheduling over time ("const", "sin", "cos", "exp").
+        weight : float
+            Multiplying coefficient.
+        frequency : float
+            for mode = "sin".
+        decay_factor : float
+            for mode = "exp".
+        """
+        if weight is None: weight = 0.0
+        if frequency is None: frequency = 0.0
+        if decay_factor is None: decay_factor = 0.0
+        if mode is None: mode = "const"
+        if mode == "const":
+            f  = lambda t: weight
+        elif mode == "sin":
+            f  = lambda t: weight * np.sin(frequency * t)
+        elif mode == "cos":
+            f  = lambda t: weight * np.cos(frequency * t)
+        elif mode == "exp":
+            f  = lambda t: weight * np.exp(- decay_factor * t)
+        else:
+            raise ValueError(f"mode must be const|sin|exp, not {mode}.")
+        return f
 
-def null_source() -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-    return constant_source()
-
-def decaying_surce(
-        sigma: float = 1.0,
-        center: tuple = (0.0, 0.0),
-        amp: float = 0.0,
-        delta: float = 0.1
-        ) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
-    """
-    Returns an exponentially-decaying-in-time source function:
-    - s(x, y, t) = amp * e^(- delta * t) * G(x, y),
-    - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
-
-    Parameters
-    ----------
-    sigma : float
-        Standard deviation of the Gaussian.
-    center : tuple
-        Center (xc, yc) of the Gaussian.
-    amp : float
-        Constant multiplicative coefficient of the Gaussian.
-    delta : float
-        The decay rate: e^(- delta * t).
-    
-    Returns
-    -------
-    Callable
-        Exponentially-decaying-in-time source function s(x, y, t) = amp * e^(- delta * t) * G(x, y).
-    """
-    xc, yc = center
-    
-    def G(x, y): # Gaussian spot
-        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
-        
-    def source(x, y, t):
-        return amp * np.exp(- delta * t) * G(x, y)
-
-    return source
-
-def oscillating_source(
-        sigma: float = 1.0,
-        center: tuple = (0.0, 0.0),
-        amp: float = 0.0,
-        period: float = 5.0
-        ) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
-    """
-    Returns an oscillating-in-time source function:
-    - s(x, y, t) = amp * sin((2 * pi / period) * t) * G(x, y),
-    - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) ).
-
-    Parameters
-    ----------
-    sigma : float
-        Standard deviation of the Gaussian.
-    center : tuple
-        Center (xc, yc) of the Gaussian.
-    amp : float
-        Constant multiplicative coefficient of the Gaussian.
-    period : float
-        - sin(2 * pi / period * t).
-
-    Returns
-    -------
-    Callable
-        Oscillating-in-time source s(x, y, t) = amp * sin((2 * pi / period) * t) * G(x, y).
-    """
-    xc, yc = center
-    
-    def G(x, y): # Gaussian spot
-        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
-        
-    w = 2 * np.pi / period
-    
-    def source(x, y, t):
-        return amp * np.sin(w * t) * G(x, y)
-
-    return source
-
-def temporary_source(
-        sigma: float = 1.0,
-        center: tuple = (0.0, 0.0),
-        amp: float = 0.0,
-        period: float = 5.0
-        ) -> Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
-    """
-    Returns a limited-in-time (discontinuous-in-time) source function:
-        - s(x, y, t) = amp * (t < period) * G(x, y)
-        - G(x, y) = e^( -((x - xc)^2 + (y - yc)^2) / (2 * sigma^2) )
-
-    Parameters
-    ----------
-    sigma : float
-        Standard deviation of the Gaussian.
-    center : tuple
-        Center (xc, yc) of the Gaussian.
-    amp : float
-        Constant multiplicative coefficient of the Gaussian.
-    period : float
-        Source limit time.
-
-    Returns
-    -------
-    Callable
-        Limited-in-time (discontinuous-in-time) source function s(x, y, t) = amp * (t < period) * G(x, y).
-    """
-    xc, yc = center
-        
-    def G(x, y): # Gaussian spot
-        return np.exp(- ((x - xc) ** 2 + (y - yc) ** 2)/(2 * sigma ** 2))
-        
-    def source(x, y, t):
-        return amp * G(x, y) * (t < period)
-    
-    return source
-
-def logistic_source(
-        A: float = 0.0,
-        B: float = 0.0
-        ) -> Callable[[np.ndarray], float]:
-    """
-    Returns a logistic source function:
-        - s(u) = A * u^2 - B * u.
-
-    Parameters
-    ----------
-    A : float
-    B : float
-
-    Returns
-    -------
-    Callable
-        Source function s(u) = A * u^2 - B * u.
-    """
-    def source(u):
-        return A * u ** 2 - B * u
-
-    return source
-
-def allen_cahn_source(
-        A: float = 0.0
-        ) -> Callable[[np.ndarray], float]:
-    """
-    Returns an Allen-Cahn-type source function:
-        - s(u) = A * (u^3 - u)
-
-    Parameters
-    ----------
-    A : float
-
-    Returns
-    -------
-    Callable
-        Source function s(u) = A * (u^3 - u).
-    """
-    def source(u):
-        return A * (u ** 3 - u)
-
-    return source
-
-def arrhenius_source(
-        A: float = 0.0,
-        B: float = 0.0
-        ) -> Callable[[np.ndarray], float]:
-    """
-    Returns an Arrhenius-type source function:
-        - s(u) = A * e^(- B / u)
-
-    Parameters
-    ----------
-    A : float
-    B : float
-
-    Returns
-    -------
-    Callable
-        Source function s(u) = A * e^(- B / u).
-    """
-    def source(u = None):
-        return A * np.exp(- B / u)
-
-    return source
 
 def velocity_field(field: str = "rotation_expansion", **p: Any) -> Callable[[np.ndarray, np.ndarray, float], np.ndarray]:
     """
