@@ -608,6 +608,14 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
         task.velocity = self.velocity
         return task
 
+    def state_dict(self):
+        extra = {}
+        if self.velocity_fn.isinstance
+        return super().state_dict()
+
+    def load_state(self, state):
+        super().load_state(state)
+
 # ===================================== StationaryAllenCahnTask =====================================
 class StationaryAllenCahnTask(PhysicsTask):
     """
