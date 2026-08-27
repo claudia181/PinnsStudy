@@ -555,6 +555,55 @@ class AdvectionReactionDiffusion:
             eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
             eq.solve(var=rho, dt=dt)
 
+    #@classmethod
+    #def residual(
+    #    cls,
+    #    du: torch.Tensor,
+    #    d2u: torch.Tensor,
+    #    D: torch.Tensor = None,
+    #    velocity: torch.Tensor = None,
+    #    source: torch.Tensor = None,
+    #    implicit_source: str = None,
+    #    u: torch.Tensor = None,
+    #    A: torch.Tensor = None,
+    #    B: torch.Tensor = None
+    #    ) -> torch.Tensor:
+#
+    #    dux = du[:, 0]
+    #    duy = du[:, 1]
+    #    dut = du[:, 2]
+#
+    #    uxx = d2u[:, 0] # d2u[:, 0, 0]
+    #    uyy = d2u[:, 1] # d2u[:, 1, 1]
+    #    # utt = d2u[:, 2, 2]
+#
+    #    if velocity is None:
+    #        vx = 0.0
+    #        vy = 0.0
+    #    else:
+    #        vx = velocity[:, 0]
+    #        vy = velocity[:, 1]
+#
+    #    if D is None:
+    #        diffusion_term = 0.0
+    #    else:
+    #        diffusion_term = D * (uxx + uyy)
+#
+    #    if source is None:
+    #        source_term = 0.0
+    #    else:
+    #        source_term = source
+#
+    #    if implicit_source == "AllenCahn":
+    #        implicit_source_term = A * (u ** 3 - u)
+    #    elif implicit_source == "logistic":
+    #        implicit_source_term = A * u ** 2 - B * u
+    #    elif implicit_source == "Arrhenius":
+    #        implicit_source_term = A * torch.exp(- B / u)
+    #    else:
+    #        implicit_source_term = 0.0
+    #    return dut + vx * dux + vy * duy + implicit_source_term - source_term - diffusion_term
+
     @classmethod
     def residual(
         cls,
@@ -563,10 +612,7 @@ class AdvectionReactionDiffusion:
         D: torch.Tensor = None,
         velocity: torch.Tensor = None,
         source: torch.Tensor = None,
-        implicit_source: str = None,
-        u: torch.Tensor = None,
-        A: torch.Tensor = None,
-        B: torch.Tensor = None
+        implicit_source: torch.Tensor = None
         ) -> torch.Tensor:
         """
         Compute the residual for the governing equation of the system.
@@ -579,21 +625,13 @@ class AdvectionReactionDiffusion:
             u gradient field.
         d2u : torch.Tensor
             u Hessian field.
-        vx : torch.Tensor
+        velocity : torch.Tensor
             x-components of the velocity.
-        vy : torch.Tensor
-            y-components of the velocity.
         D : float
             Diffusion coefficient.
         source : torch.Tensor
             Source values; if None, it means that the source is implicit.
-        implicit_source : str
-            AllenCahn | logistic | Arrhenius.
-        A : float
-            Implicit source parameter.
-        B : float
-            Implicit source parameter.
-        
+    
         if implicit_source == "AllenCahn":\n
             implicit_source_term = A * (u^3 - u)\n
         elif implicit_source == "logistic":\n
@@ -612,9 +650,8 @@ class AdvectionReactionDiffusion:
         duy = du[:, 1]
         dut = du[:, 2]
 
-        uxx = d2u[:, 0] # d2u[:, 0, 0]
-        uyy = d2u[:, 1] # d2u[:, 1, 1]
-        # utt = d2u[:, 2, 2]
+        uxx = d2u[:, 0]
+        uyy = d2u[:, 1]
 
         if velocity is None:
             vx = 0.0
@@ -622,23 +659,21 @@ class AdvectionReactionDiffusion:
         else:
             vx = velocity[:, 0]
             vy = velocity[:, 1]
-
-        if D is None:
-            diffusion_term = 0.0
-        else:
-            diffusion_term = D * (uxx + uyy)
+        advection_term = vx * dux + vy * duy
 
         if source is None:
             source_term = 0.0
         else:
             source_term = source
 
-        if implicit_source == "AllenCahn":
-            implicit_source_term = A * (u ** 3 - u)
-        elif implicit_source == "logistic":
-            implicit_source_term = A * u ** 2 - B * u
-        elif implicit_source == "Arrhenius":
-            implicit_source_term = A * torch.exp(- B / u)
-        else:
+        if implicit_source is None:
             implicit_source_term = 0.0
-        return dut + vx * dux + vy * duy + implicit_source_term - source_term - diffusion_term
+        else:
+            implicit_source_term = implicit_source
+
+        if D is None:
+            diffusion_term = 0.0
+        else:
+            diffusion_term = D * (uxx + uyy)
+        
+        return dut + advection_term + implicit_source_term - source_term - diffusion_term

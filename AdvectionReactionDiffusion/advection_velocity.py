@@ -12,7 +12,7 @@ Classes:
 
 import torch
 import numpy as np
-from typing import Callable
+from typing import Callable, Self
 
 # ===================================== Velocity class =====================================
 class Velocity:
@@ -315,7 +315,7 @@ class Velocity:
         return state_view
 
     @classmethod
-    def null_velocity(cls) -> Callable[[np.ndarray, np.ndarray, float], np.ndarray]:
+    def null_velocity(cls) -> Self:
         """
         Returns a null velocity vector field (Velocity object).
         """

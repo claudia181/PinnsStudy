@@ -30,10 +30,12 @@ Moreover any physics task has associated the following attributes:
 
 from typing import Callable
 import torch
-from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion, null_velocity_field
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
 from StationaryAllenCahn.allen_cahn import AllenCahn
 from model import Pinn
 from typing import List, Self
+from AdvectionReactionDiffusion.advection_velocity import Velocity
+from AdvectionReactionDiffusion.reaction_source import Source
 
 # ===================================== PhysicsTask =====================================
 class PhysicsTask:
@@ -518,29 +520,17 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
     def __init__(self,
             velocity: Callable = None,
             source: Callable = None,
-            implicit_source: str = None,
-            implicit_source_parameters: dict = {},
+            implicit_source: Callable = None,
             D: float = None,
             weight: float = None
     ):
         self.velocity_fn = velocity
-        self.velocity_vectors = None
-
         self.source_fn = source
-        self.source_values = None
-
-        if implicit_source is not None and \
-            (implicit_source_parameters is None or \
-            "A" not in implicit_source_parameters.keys() or \
-            "B" not in implicit_source_parameters.keys()):
-
-            raise ValueError(f"Implicit source {implicit_source} needs 'A' and 'B' parameters, but implicit_source_parameters is {implicit_source_parameters}.")
-        
-        self.parameters = {"D": D, "implicit_source": implicit_source} | implicit_source_parameters
+        self.implicit_source_fn = implicit_source
+        self.D = D
 
         super().__init__(
             task_id="AdvectionReactionDiffusionGE",
-            parameters=self.parameters,
             weight=weight
         )
 
@@ -548,7 +538,10 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             u: torch.Tensor = None,
             du: torch.Tensor = None,
             d2u: torch.Tensor = None,
-            input_parameters: dict = None
+            D_values: torch.Tensor = None,
+            velocity_values: torch.Tensor = None,
+            source_values: torch.Tensor = None,
+            implicit_source_values: torch.Tensor = None
     ) -> torch.Tensor:
         """
         Left hand side. It calls self._lhs.
@@ -568,12 +561,23 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
         -------
         _torch.Tensor_
         """
-        if input_parameters is None:
-            input_parameters = {}
-        #TODO: functions to set source_values and velocity_vectors
+        if velocity_values is None:
+            velocity_values = self.velocity_fn(x=x, y=y, t=t)
+        if source_values is None:
+            source_values = self.source_fn(x=x, y=y, t=t)
+        if implicit_source_values is None:
+            implicit_source_values = self.implicit_source_fn(u=u)
+        if D_values is None:
+            D_values = self.D
 
-        all_parameters = self.parameters | input_parameters
-        return AdvectionReactionDiffusion.residual(u=u, du=du, d2u=d2u, **all_parameters)
+        return AdvectionReactionDiffusion.residual(
+            du=du, 
+            d2u=d2u, 
+            velocity=velocity_values, 
+            source=source_values, 
+            implicit_source=implicit_source_values, 
+            D=D_values
+        )
 
     def loss(self, x: torch.Tensor, input_params: torch.Tensor, model: Pinn) -> torch.Tensor:
         """
@@ -610,11 +614,31 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
 
     def state_dict(self):
         extra = {}
-        if self.velocity_fn.isinstance
-        return super().state_dict()
+        if isinstance(self.velocity_fn, Velocity):
+            extra ["velocity_fn"] = self.velocity_fn.state_dict()
+        if isinstance(self.source_fn, Source):
+            extra ["source_fn"] = self.source_fn.state_dict()
+        if isinstance(self.implicit_source_fn, Source):
+            extra ["implicit_source_fn"] = self.implicit_source_fn.state_dict()
+        return super().state_dict() | extra
 
     def load_state(self, state):
         super().load_state(state)
+        if "velocity_fn" in state.keys():
+            self.velocity_fn = Velocity.null_velocity()
+            self.velocity_fn.load_state(state["velocity_fn"])
+        else:
+            self.velocity_fn = None
+        if "source_fn" in state.keys():
+            self.source_fn = Source.null_source()
+            self.source_fn.load_state(state["source_fn"])
+        else:
+            self.source_fn = None
+        if "implicit_source_fn" in state.keys():
+            self.implicit_source_fn = Source.null_source()
+            self.implicit_source_fn.load_state(state["implicit_source_fn"])
+        else:
+            self.implicit_source_fn = None
 
 # ===================================== StationaryAllenCahnTask =====================================
 class StationaryAllenCahnTask(PhysicsTask):
