@@ -128,7 +128,8 @@ class AllenCahn:
         return force
     
     @classmethod
-    def residual(cls, u: torch.Tensor, d2u: torch.Tensor, force: torch.Tensor, lam: float) -> torch.Tensor:
+    #def residual(cls, u: torch.Tensor, d2u: torch.Tensor, force: torch.Tensor, lam: float) -> torch.Tensor:
+    def residual(cls, u: torch.Tensor, d2u: torch.Tensor, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
         """
         Compute the residual.
 
@@ -152,7 +153,56 @@ class AllenCahn:
         """
         uxx = d2u[:, 0, 0]
         uyy = d2u[:, 1, 1]
+        force = AllenCahn._force_term(x=x, y=y, lam=lam, force_params=force_params)
         return lam * (uxx + uyy) - u + u ** 3 - force
+
+    @classmethod
+    def _force_term(cls, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the residual.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Solution values.
+        du : torch.Tensor
+            1st derivative values.
+        d2u : torch.Tensor
+            2nd derivative values.
+        force : torch.Tensor
+            Force values.
+        lam : float
+            Thickness parameter.
+
+        Returns
+        -------
+        torch.Tensor
+            Residual values.
+        """
+        if len(force_params) == 1:
+            u = torch.exp(- force_params[0] * (x + 0.7)) * torch.sin(torch.pi * x) * torch.sin(torch.pi * y)
+
+            uxx = torch.sin(torch.pi * y) * torch.exp(- force_params[0] * (x + 0.7)) * (torch.sin(torch.pi * x * (force_params[0] ** 2 - torch.pi ** 2) - 2 * force_params[0] * torch.pi * torch.cos(torch.pi * x)))
+            uyy = - torch.exp(- force_params[0] * (x + 0.7)) * torch.pi ** 2 * torch.sin(torch.pi * x) * torch.sin(torch.pi * y)
+            
+        else:
+            u = 0.0
+            for j in range(1, len(force_params) + 1):
+                xi_j = force_params[j-1].item()
+                u += (xi_j * torch.sin(j * torch.pi * x) * torch.sin(j * torch.pi * y) / (j ** 2))
+            u = u / force_params.shape[0] # normalize
+
+            uxx = 0.0
+            uyy = 0.0
+            for j in range(1, len(force_params) + 1):
+                xi_j = force_params[j-1].item()
+                uxx += (- xi_j * (torch.pi ** 2) * torch.sin(j * torch.pi * x) * torch.sin(j * torch.pi * y)) / force_params.shape[0]
+                uyy += (- xi_j * (torch.pi ** 2) * torch.sin(j * torch.pi * x) * torch.sin(j * torch.pi * y)) / force_params.shape[0]
+
+        force = lam * (uxx + uyy) + u ** 3 - u
+        return force
+
+        
 
     def _sol(self) -> torch.Tensor:
         """
