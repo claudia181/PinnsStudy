@@ -20,6 +20,7 @@ from typing import Callable, List, Tuple, Set
 from trajectory import Trajectory
 from reaction_source import Source
 from advection_velocity import Velocity
+from boundary import Boundary, RectangularBoundary, CircleBoundary
 
 # ===================================== AdvectionReactionDiffusion class =====================================
 class AdvectionReactionDiffusion:
@@ -147,15 +148,8 @@ class AdvectionReactionDiffusion:
         # Initial state
         self.u0 = None
 
-        # Rectangular domain: boundary modes and values
-        self.left_mode, self.left_value = None, None
-        self.right_mode, self.right_value = None, None
-        self.top_mode, self.top_value = None, None
-        self.bottom_mode, self.bottom_value = None, None
-
-        # Circular domain: boundary mode and value
-        self.boundary_mode = None
-        self.boundary_value = None
+        # Boundary
+        self.boundary = None
 
         # Domain shape
         self.shape = None
@@ -342,7 +336,7 @@ class AdvectionReactionDiffusion:
         # Adding gaussian bumps
         if gaussian:
             def normal(x0, y0, sigma = 0.1, amp = 1.0):
-                return amp * np.exp(-((self.x - x0)**2 + (self.y - y0)**2) / (2 * sigma**2))
+                return amp * np.exp(-((self.x - x0) ** 2 + (self.y - y0) ** 2) / (2 * sigma ** 2))
 
             if centers is None or centers == []:
                 centers = []
@@ -359,7 +353,7 @@ class AdvectionReactionDiffusion:
         
         # Adding concentric circles
         if periodic_circles:
-            self.u0 += A * np.sin(B * np.sqrt(Cx * self.x**2 + Cy * self.y**2) + D) # concentric circles
+            self.u0 += A * np.sin(B * np.sqrt(Cx * self.x ** 2 + Cy * self.y ** 2) + D) # concentric circles
         if periodic_valleys:
             self.u0 += A * np.sin(B * (self.x * self.y)) # circle^-1
         
@@ -369,7 +363,7 @@ class AdvectionReactionDiffusion:
         
         # Adding grid pattern
         if periodic_grid:
-            self.u0 += Ax * np.sin(Bx * self.x**2 + Cx) + Ay * np.sin(By * self.y**2 + Cy)
+            self.u0 += Ax * np.sin(Bx * self.x ** 2 + Cx) + Ay * np.sin(By * self.y ** 2 + Cy)
 
         # Adding uniform noise
         if uniform_noise:
@@ -377,12 +371,7 @@ class AdvectionReactionDiffusion:
     
     def set_BC(
             self,
-            left: tuple = ["Neumann", 0.0],
-            right: tuple = ["Neumann", 0.0],
-            top: tuple = ["Neumann", 0.0],
-            bottom: tuple = ["Neumann", 0.0],
-            mode: str = "Neumann",
-            value: float = 0.0
+            boundary: Boundary
             ) -> None:
         """
         Set the boundary conditions (Neumann or Dirichlet).
@@ -411,22 +400,9 @@ class AdvectionReactionDiffusion:
         -------
         None
         """
-        # Rectangular boundary
-        if self.shape == "rectangle":
-            self.left_mode, self.left_value = left
-            self.right_mode, self.right_value = right
-            self.top_mode, self.top_value = top
-            self.bottom_mode, self.bottom_value = bottom
-            modes = [self.left_mode, self.right_mode, self.top_mode, self.bottom_mode]
-            sides = ["left", "right", "top", "bottom"]
-            for mode, side in zip(modes, sides):
-                if mode not in ["Neumann", "Dirichlet"]:
-                    raise ValueError(f"Unrecognized {side} boundary mode '{mode}'.")
-        
-        # Circular boundary
-        elif self.shape == "circle":
-            self.boundary_mode = mode
-            self.boundary_value = value
+        if self.shape != boundary.shape:
+            raise ValueError(f"Shape mismatch: self.shape = {self.shape} != {boundary.shape} = boundary.shape.")
+        self.boundary = boundary
 
     def solve(
             self,
@@ -477,23 +453,8 @@ class AdvectionReactionDiffusion:
         # Set the initial field
         rho.setValue(self.u0)
 
-        # Set the BCs (Neumann or Dirichlet)
-        ## Rectangular domain
-        if self.shape == "rectangle":
-            modes = [self.left_mode, self.right_mode, self.top_mode, self.bottom_mode]
-            values = [self.left_value, self.right_value, self.top_value, self.bottom_value]
-            meshFaces = [self.mesh.facesLeft, self.mesh.facesRight, self.mesh.facesTop, self.mesh.facesBottom]
-            for mode, value, meshFaces in zip(modes, values, meshFaces):
-                if mode == "Neumann":
-                    rho.faceGrad.constrain(value, meshFaces)
-                elif mode == "Dirichlet":
-                    rho.constrain(value, meshFaces)
-        ## Circular domain
-        elif self.shape == "circle":
-            if self.boundary_mode == "Neumann":
-                rho.faceGrad.constrain(self.boundary_value, self.mesh.exteriorFaces)
-            elif self.boundary_mode == "Dirichlet":
-                rho.constrain(self.boundary_value, self.mesh.exteriorFaces)
+        # Apply the BCs (Neumann or Dirichlet)
+        self.boundary.apply_conditions(rho=rho, mesh=self.mesh)
 
         # Time instants to simulate (the timeline)
         timeline = np.arange(start=t0, stop=tN, step=dt)

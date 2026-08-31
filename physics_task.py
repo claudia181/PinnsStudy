@@ -728,13 +728,17 @@ class StationaryAllenCahnTask(PhysicsTask):
     Task for the stationary Allen-Cahn governing equation.
     """
 
-    def __init__(self, lam: torch.Tensor = None, xi_vector: torch.Tensor = None, xi_in_input: bool = False, weight: float = None):
-        self.param_keys = ["lam", "xi"]
+    def __init__(self, lam: torch.Tensor = None, xi_vector: torch.Tensor = None, lam_index: int = None, xi_indexes: List[int] = None, weight: float = None):
         self.lam = lam
         self.xi_vector = xi_vector
-        if xi_in_input:
-            input_param_indexes = [i+1 for i in range(len(xi_vector))]
-        else:
+        self.lam_index = lam_index
+        self.xi_indexes = xi_indexes
+        input_param_indexes = []
+        if lam_index is not None:
+            input_param_indexes.append(lam_index)
+        if xi_indexes is not None:
+            input_param_indexes += xi_indexes#[i+1 for i in range(len(xi_vector))]
+        if input_param_indexes == []:
             input_param_indexes = None
         super().__init__(
             task_id="StationaryAllenCahnGE",
@@ -760,12 +764,16 @@ class StationaryAllenCahnTask(PhysicsTask):
         x_ = x[:, 0]
         y = x[:, 1]
 
-        if self.input_param_indexes is not None:
-            xi_values = pde_parameters[self.input_param_indexes]
+        if self.lam_index is not None:
+            lam_values = pde_parameters[:, self.lam_index]
         else:
-            xi_values = None
+            lam_values = self.lam
+        if self.xi_indexes is not None:
+            xi_values = pde_parameters[:, self.xi_indexes]
+        else:
+            xi_values = self.xi_vector
 
-        residual_value = AllenCahn.residual(u=u, d2u=d2u, x=x_, y=y, lam=self.lam, force_params=xi_values)
+        residual_value = AllenCahn.residual(u=u, d2u=d2u, x=x_, y=y, lam=lam_values, force_params=xi_values)
 
         return mse_loss(residual_value, torch.zeros_like(residual_value))
     
@@ -786,7 +794,9 @@ class StationaryAllenCahnTask(PhysicsTask):
     def state_dict(self) -> dict:
         extra = {
             "lam": self.lam,
-            "xi_vector": self.xi_vector
+            "lam_index": self.lam_index,
+            "xi_vector": self.xi_vector,
+            "xi_indexes": self.xi_indexes
         }
         return super().state_dict() | extra
 
@@ -794,4 +804,6 @@ class StationaryAllenCahnTask(PhysicsTask):
         super().load_state(state)
 
         self.lam = state["lam"]
+        self.lam_index = state["lam_index"]
         self.xi_vector = state["xi_vector"]
+        self.xi_indexes = state["xi_indexes"]

@@ -100,32 +100,32 @@ class AllenCahn:
         self.u = self._sol()
         self.du = self._der()
         self.d2u = self._hes()
-        uxx = self.d2u[:, 0, 0]
-        uyy = self.d2u[:, 1, 1]
-        self.force = self.lam * (uxx + uyy) + self.u ** 3 - self.u 
+        uxx = self.d2u[:, 0]
+        uyy = self.d2u[:, 1]
+        self.force = self.lam * (uxx + uyy) + self.u ** 3 - self.u
 
-    def compute_force(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute the force at the given spatial points.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-        y : torch.Tensor
-
-        Returns
-        -------
-        torch.Tensor
-            Force values at the given spatial points.
-        """
-        self.x = x
-        self.y = y
-        u = self._sol()
-        d2u = self._hes()
-        uxx = d2u[:, 0, 0]
-        uyy = d2u[:, 1, 1]
-        force = self.lam * (uxx + uyy) + u ** 3 - u
-        return force
+    #def compute_force(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    #    """
+    #    Compute the force at the given spatial points.
+#
+    #    Parameters
+    #    ----------
+    #    x : torch.Tensor
+    #    y : torch.Tensor
+#
+    #    Returns
+    #    -------
+    #    torch.Tensor
+    #        Force values at the given spatial points.
+    #    """
+    #    self.x = x
+    #    self.y = y
+    #    u = self._sol()
+    #    d2u = self._hes()
+    #    uxx = d2u[:, 0]
+    #    uyy = d2u[:, 1]
+    #    force = self.lam * (uxx + uyy) + u ** 3 - u
+    #    return force
     
     @classmethod
     #def residual(cls, u: torch.Tensor, d2u: torch.Tensor, force: torch.Tensor, lam: float) -> torch.Tensor:
@@ -151,13 +151,13 @@ class AllenCahn:
         torch.Tensor
             Residual values.
         """
-        uxx = d2u[:, 0, 0]
-        uyy = d2u[:, 1, 1]
-        force = AllenCahn._force_term(x=x, y=y, lam=lam, force_params=force_params)
+        uxx = d2u[:, 0]
+        uyy = d2u[:, 1]
+        force = AllenCahn._force(x=x, y=y, lam=lam, force_params=force_params)
         return lam * (uxx + uyy) - u + u ** 3 - force
 
     @classmethod
-    def _force_term(cls, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
+    def _force(cls, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
         """
         Compute the residual.
 
@@ -201,8 +201,6 @@ class AllenCahn:
 
         force = lam * (uxx + uyy) + u ** 3 - u
         return force
-
-        
 
     def _sol(self) -> torch.Tensor:
         """
@@ -252,7 +250,7 @@ class AllenCahn:
             uxx = torch.sin(torch.pi * self.y) * torch.exp(- self.force_params[0] * (self.x + 0.7)) * (torch.sin(torch.pi * self.x * (self.force_params[0] ** 2 - torch.pi ** 2) - 2 * self.force_params[0] * torch.pi * torch.cos(torch.pi * self.x)))
             uxy = torch.cos(torch.pi * self.y) * torch.exp(- self.force_params[0] * (self.x + 0.7)) * torch.pi * (torch.pi * torch.cos(torch.pi * self.x) - self.force_params[0] * torch.sin(torch.pi * self.x))
             uyy = - torch.exp(- self.force_params[0] * (self.x + 0.7)) * torch.pi ** 2 * torch.sin(torch.pi * self.x) * torch.sin(torch.pi * self.y)
-            return torch.column_stack((uxx, uxy, uxy, uyy)).reshape((-1, 2, 2))
+            return torch.column_stack((uxx, uyy, uxy), dim=1)
         else:
             uxx = 0.0
             uyy = 0.0
@@ -262,5 +260,6 @@ class AllenCahn:
                 uxx += (- xi_j * (torch.pi ** 2) * torch.sin(j * torch.pi * self.x) * torch.sin(j * torch.pi * self.y))
                 uyy += (- xi_j * (torch.pi ** 2) * torch.sin(j * torch.pi * self.x) * torch.sin(j * torch.pi * self.y))
                 uxy += (xi_j * (torch.pi ** 2) * torch.cos(j * torch.pi * self.x) * torch.cos(j * torch.pi * self.y))
-            hes = torch.stack((uxx, uxy, uxy, uyy), dim=-1).reshape((-1, 2, 2))
+            #hes = torch.stack((uxx, uxy, uxy, uyy), dim=-1).reshape((-1, 2, 2))
+            hes = torch.stack((uxx, uyy, uxy), dim=1)
             return hes / self.force_params.shape[0] # normalize
