@@ -18,9 +18,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, List, Tuple, Set
 from trajectory import Trajectory
-from reaction_source import Source
-from advection_velocity import Velocity
-from boundary import Boundary, RectangularBoundary, CircleBoundary
+from AdvectionReactionDiffusion.reaction_source import Source
+from AdvectionReactionDiffusion.advection_velocity import Velocity
+from AdvectionReactionDiffusion.boundary_condition import BoundaryCondition, RectangularBoundaryCondition, CircularBoundaryCondition
+from AdvectionReactionDiffusion.initial_condition import InitialCondition
 
 # ===================================== AdvectionReactionDiffusion class =====================================
 class AdvectionReactionDiffusion:
@@ -87,9 +88,9 @@ class AdvectionReactionDiffusion:
 
     def __init__(
             self,
-            velocity: Callable = None,
-            source: Callable = None,
-            implicit_source: Callable = None,
+            velocity: Velocity = None,
+            source: Source = None,
+            implicit_source: Source = None,
             diffusion_coeff: float = None
             ):
         """
@@ -149,7 +150,7 @@ class AdvectionReactionDiffusion:
         self.u0 = None
 
         # Boundary
-        self.boundary = None
+        self.boundary_condition = None
 
         # Domain shape
         self.shape = None
@@ -252,157 +253,161 @@ class AdvectionReactionDiffusion:
             self.xmin, self.xmax = -radius, radius
             self.ymin, self.ymax = -radius, radius
 
+    #def set_IC(
+    #        self,
+    #        gaussian: bool, 
+    #        periodic_circles: bool, 
+    #        periodic_valleys: bool, 
+    #        periodic_stripes: bool, 
+    #        periodic_grid: bool, 
+    #        uniform_noise: bool, 
+    #        u0: np.ndarray = None, 
+    #        centers: List[Tuple[float, float]] = None, amps: List[float] = None, sigmas: List[float] = None, 
+    #        A: float = None, Ax: float = None, Ay: float = None, 
+    #        B: float = None, Bx: float = None, By: float = None, 
+    #        Cx: float = None, Cy: float = None, 
+    #        D: float = None, 
+    #        min_noise: float = None, max_noise: float = None
+    #        ) -> None:
+    #    """
+    #    Set the initial conditions.
+#
+    #    Default: zero on all the domain.
+#
+    #    Parameters
+    #    ----------
+    #    gaussian : bool
+    #        If True, a set of Gaussian bumps is added to the scalar field u0.
+    #        - amp * e^(-((x - xc)^2 + (y - yc)^2) / (2 * sigma^2)).
+    #    periodic_circles : bool
+    #        If True, a set of concentric circles is added to the scalar field u0.
+    #        - A * sin(B * sqrt(Cx * x^2 + Cy * y^2) + D).
+    #    periodic_valleys : bool
+    #        If True, a set of concentric valleys is added to the scalar field u0.
+    #        - A * sin(B * (x * y))
+    #    periodic_stripes : bool
+    #        If True, a set of stripes is added to the initial scalar field u0.
+    #        - A * sin(Bx * x + By * y)
+    #    periodic_grid : bool
+    #        If True, add sine waves along the x and y dimentions to the scalar field u0.
+    #        - Ax * sin(Bx * x^2 + Cx) + Ay * sin(By * y^2 + Cy)
+    #    uniform_noise : bool
+    #        If True, add uniform noise (between min_noise and max_noise) to the scalar field u0.
+    #    u0 : np.ndarray
+    #        Initial scalar field.
+    #    centers : list
+    #        Used if gaussian is True; centers of the Gaussians.
+    #    amps : list
+    #        Used if gaussian is True; amplitudes, one for each center, regulate the height of each Gaussian.
+    #    sigmas : list
+    #        Used if gaussian is True; regulate the width of each Gaussian.
+    #    A : float
+    #        Parameter to shape the initial state (see above).
+    #    Ax : float
+    #        Parameter to shape the initial state (see above).
+    #    Ay : float
+    #        Parameter to shape the initial state (see above).
+    #    B : float
+    #        Parameter to shape the initial state (see above).
+    #    Bx : float
+    #        Parameter to shape the initial state (see above).
+    #    By : float
+    #        Parameter to shape the initial state (see above).
+    #    Cx : float
+    #        Parameter to shape the initial state (see above).
+    #    Cy : float
+    #        Parameter to shape the initial state (see above).
+    #    D : float
+    #        Parameter to shape the initial state (see above).
+    #    min_noise : float
+    #        Parameter to shape the initial state (see above).
+    #    max_noise : float
+    #        Parameter to shape the initial state (see above).
+    #    
+    #    Returns
+    #    -------
+    #    None
+    #    """
+    #    # Base scalar field, which can be successively deformed by adding bumps, valleys or uniform noise.
+    #    if u0 is not None:
+    #        self.u0 = u0 * np.ones_like(self.x)
+    #    else:
+    #        self.u0 = np.zeros_like(self.x)
+#
+    #    # Adding gaussian bumps
+    #    if gaussian:
+    #        def normal(x0, y0, sigma = 0.1, amp = 1.0):
+    #            return amp * np.exp(-((self.x - x0) ** 2 + (self.y - y0) ** 2) / (2 * sigma ** 2))
+#
+    #        if centers is None or centers == []:
+    #            centers = []
+    #            amps = []
+    #            sigmas = []
+    #        else:
+    #            if amps is None or amps == []:
+    #                amps = [1.0 for _ in centers]
+    #            if sigmas is None or sigmas == []:
+    #                sigmas = [0.1 for _ in centers]
+#
+    #        for center, amp, sigma in zip(centers, amps, sigmas):
+    #            self.u0 += normal(x0=center[0], y0=center[1], sigma=sigma, amp=amp)
+    #    
+    #    # Adding concentric circles
+    #    if periodic_circles:
+    #        self.u0 += A * np.sin(B * np.sqrt(Cx * self.x ** 2 + Cy * self.y ** 2) + D) # concentric circles
+    #    if periodic_valleys:
+    #        self.u0 += A * np.sin(B * (self.x * self.y)) # circle^-1
+    #    
+    #    # Adding stripes
+    #    if periodic_stripes:
+    #        self.u0 += A * np.sin(Bx * self.x + By * self.y) # stripes
+    #    
+    #    # Adding grid pattern
+    #    if periodic_grid:
+    #        self.u0 += Ax * np.sin(Bx * self.x ** 2 + Cx) + Ay * np.sin(By * self.y ** 2 + Cy)
+#
+    #    # Adding uniform noise
+    #    if uniform_noise:
+    #        self.u0 += np.random.uniform(low=min_noise * np.ones_like(self.u0), high=max_noise * np.ones_like(self.u0))
+
     def set_IC(
             self,
-            gaussian: bool, 
-            periodic_circles: bool, 
-            periodic_valleys: bool, 
-            periodic_stripes: bool, 
-            periodic_grid: bool, 
-            uniform_noise: bool, 
-            u0: np.ndarray = None, 
-            centers: List[Tuple[float, float]] = None, amps: List[float] = None, sigmas: List[float] = None, 
-            A: float = None, Ax: float = None, Ay: float = None, 
-            B: float = None, Bx: float = None, By: float = None, 
-            Cx: float = None, Cy: float = None, 
-            D: float = None, 
-            min_noise: float = None, max_noise: float = None
+            initial_condition: InitialCondition 
             ) -> None:
         """
         Set the initial conditions.
 
-        Default: zero on all the domain.
-
         Parameters
         ----------
-        gaussian : bool
-            If True, a set of Gaussian bumps is added to the scalar field u0.
-            - amp * e^(-((x - xc)^2 + (y - yc)^2) / (2 * sigma^2)).
-        periodic_circles : bool
-            If True, a set of concentric circles is added to the scalar field u0.
-            - A * sin(B * sqrt(Cx * x^2 + Cy * y^2) + D).
-        periodic_valleys : bool
-            If True, a set of concentric valleys is added to the scalar field u0.
-            - A * sin(B * (x * y))
-        periodic_stripes : bool
-            If True, a set of stripes is added to the initial scalar field u0.
-            - A * sin(Bx * x + By * y)
-        periodic_grid : bool
-            If True, add sine waves along the x and y dimentions to the scalar field u0.
-            - Ax * sin(Bx * x^2 + Cx) + Ay * sin(By * y^2 + Cy)
-        uniform_noise : bool
-            If True, add uniform noise (between min_noise and max_noise) to the scalar field u0.
-        u0 : np.ndarray
-            Initial scalar field.
-        centers : list
-            Used if gaussian is True; centers of the Gaussians.
-        amps : list
-            Used if gaussian is True; amplitudes, one for each center, regulate the height of each Gaussian.
-        sigmas : list
-            Used if gaussian is True; regulate the width of each Gaussian.
-        A : float
-            Parameter to shape the initial state (see above).
-        Ax : float
-            Parameter to shape the initial state (see above).
-        Ay : float
-            Parameter to shape the initial state (see above).
-        B : float
-            Parameter to shape the initial state (see above).
-        Bx : float
-            Parameter to shape the initial state (see above).
-        By : float
-            Parameter to shape the initial state (see above).
-        Cx : float
-            Parameter to shape the initial state (see above).
-        Cy : float
-            Parameter to shape the initial state (see above).
-        D : float
-            Parameter to shape the initial state (see above).
-        min_noise : float
-            Parameter to shape the initial state (see above).
-        max_noise : float
-            Parameter to shape the initial state (see above).
+        initial_condition : InitialCondition
+            Initial condition to apply to the xy system domain.
         
         Returns
         -------
         None
         """
-        # Base scalar field, which can be successively deformed by adding bumps, valleys or uniform noise.
-        if u0 is not None:
-            self.u0 = u0 * np.ones_like(self.x)
-        else:
-            self.u0 = np.zeros_like(self.x)
-
-        # Adding gaussian bumps
-        if gaussian:
-            def normal(x0, y0, sigma = 0.1, amp = 1.0):
-                return amp * np.exp(-((self.x - x0) ** 2 + (self.y - y0) ** 2) / (2 * sigma ** 2))
-
-            if centers is None or centers == []:
-                centers = []
-                amps = []
-                sigmas = []
-            else:
-                if amps is None or amps == []:
-                    amps = [1.0 for _ in centers]
-                if sigmas is None or sigmas == []:
-                    sigmas = [0.1 for _ in centers]
-
-            for center, amp, sigma in zip(centers, amps, sigmas):
-                self.u0 += normal(x0=center[0], y0=center[1], sigma=sigma, amp=amp)
-        
-        # Adding concentric circles
-        if periodic_circles:
-            self.u0 += A * np.sin(B * np.sqrt(Cx * self.x ** 2 + Cy * self.y ** 2) + D) # concentric circles
-        if periodic_valleys:
-            self.u0 += A * np.sin(B * (self.x * self.y)) # circle^-1
-        
-        # Adding stripes
-        if periodic_stripes:
-            self.u0 += A * np.sin(Bx * self.x + By * self.y) # stripes
-        
-        # Adding grid pattern
-        if periodic_grid:
-            self.u0 += Ax * np.sin(Bx * self.x ** 2 + Cx) + Ay * np.sin(By * self.y ** 2 + Cy)
-
-        # Adding uniform noise
-        if uniform_noise:
-            self.u0 += np.random.uniform(low=min_noise * np.ones_like(self.u0), high=max_noise * np.ones_like(self.u0))
+        self.initial_condition = initial_condition
+        #self.u0 = initial_condition(self.x, self.y)
     
     def set_BC(
             self,
-            boundary: Boundary
+            boundary_condition: BoundaryCondition
             ) -> None:
         """
         Set the boundary conditions (Neumann or Dirichlet).
-        Default: Neumann with 0 value.
-        - For rectangular domains each side can have its own condition (Neumann or Dirichlet).
-        - For circular domains the BC is specified for all the entire circumference.
-        - Neumann condition -> the value is the outward flux.
-        - Dirichlet condition -> the value is the u value on the boundary.
 
         Parameters
         ----------
-        left : tuple
-            Used for rectangular spatial domains, left side BCs [str mode, float value].
-        right : tuple
-            Used for rectangular spatial domains, right side BCs [str mode, float value].
-        top : tuple
-            Used for rectangular spatial domains, top side BCs [str mode, float value].
-        bottom : tuple
-            Used for rectangular spatial domains, bottom side BCs [str mode, float value].
-        mode : str
-            Used for circular spatial domains, circumference BCs mode, "Neumann" | "Dirichlet".
-        value : float
-            Used for circular spatial domains, circumference BCs value (out normal flux for Neumann or function value for Dirichlet).
+        boundary : Boundary
+            Description of the system boundary, to be applied to the system domain boundary.
         
         Returns
         -------
         None
         """
-        if self.shape != boundary.shape:
-            raise ValueError(f"Shape mismatch: self.shape = {self.shape} != {boundary.shape} = boundary.shape.")
-        self.boundary = boundary
+        if self.shape != boundary_condition.shape:
+            raise ValueError(f"Shape mismatch: self.shape = {self.shape} != {boundary_condition.shape} = boundary.shape.")
+        self.boundary_condition = boundary_condition
 
     def solve(
             self,
@@ -451,10 +456,11 @@ class AdvectionReactionDiffusion:
         rho = CellVariable(name="rho", mesh=self.mesh)
 
         # Set the initial field
+        self.u0 = self.initial_condition(self.x, self.y)
         rho.setValue(self.u0)
 
         # Apply the BCs (Neumann or Dirichlet)
-        self.boundary.apply_conditions(rho=rho, mesh=self.mesh)
+        self.boundary_condition.apply_conditions(rho=rho, mesh=self.mesh)
 
         # Time instants to simulate (the timeline)
         timeline = np.arange(start=t0, stop=tN, step=dt)
@@ -494,11 +500,11 @@ class AdvectionReactionDiffusion:
         # Run simulation
         for i, t in enumerate(timeline):
             ## Instanciate the velocity field
-            v_value = self.v(self.x_faces, self.y_faces, t)
+            v_value = self.v(x=self.x_faces, y=self.y_faces, t=t)
 
             ## Instanciate the source fields
-            s_value = self.s(self.x, self.y, t)
-            i_s_value = self.i_s(rho.value.copy())
+            s_value = self.s(x=self.x, y=self.y, t=t)
+            i_s_value = self.i_s(u=rho.value.copy())
 
             ## Update velocity and source variables
             velocity.setValue(v_value)
@@ -513,7 +519,7 @@ class AdvectionReactionDiffusion:
                 viewer.plot()
 
             ## Simulation step
-            eq = TransientTerm() + ConvectionTerm(coeff=velocity) + implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
+            eq = TransientTerm() + ConvectionTerm(coeff=velocity) - implicit_source_term - source_term - DiffusionTerm(coeff=self.D)
             eq.solve(var=rho, dt=dt)
 
     #@classmethod
@@ -637,4 +643,4 @@ class AdvectionReactionDiffusion:
         else:
             diffusion_term = D * (uxx + uyy)
         
-        return dut + advection_term + implicit_source_term - source_term - diffusion_term
+        return dut + advection_term - implicit_source_term - source_term - diffusion_term

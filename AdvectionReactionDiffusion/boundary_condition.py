@@ -5,16 +5,18 @@ boundary.py
 This module implements the `RectangularBoundary` and `CircularBoundary` classes, for the boundary conditions of an advection-reaction-diffusion system.
 
 Classes:
-- `Boundary`
-- `RectangularBoundary`
-- `CircularBoundary`
+- `BoundaryCondition`
+- `RectangularBoundaryCondition`
+- `CircularBoundaryCondition`
 """
 
 from typing import Tuple
-from fipy import CellVariable, Grid2D, Gmsh2D
+from fipy import CellVariable, Gmsh2D
+from fipy.meshes.uniformGrid2D import UniformGrid2D
+from fipy.meshes.nonUniformGrid2D import NonUniformGrid2D
 
 # ===================================== Boundary class =====================================
-class Boundary:
+class BoundaryCondition:
     """
     Class for the boundaries.
 
@@ -36,7 +38,7 @@ class Boundary:
         if shape not in ["rectangle", "circle"]:
             raise ValueError(f"Invalid boundary shape '{shape}': Valid conditions are 'rectangle' and 'circle'.")
 
-    def apply_conditions(self, rho: CellVariable, mesh: Grid2D | Gmsh2D) -> None:
+    def apply_conditions(self, rho: CellVariable, mesh: UniformGrid2D | NonUniformGrid2D | Gmsh2D) -> None:
         return
 
     def state_dict(self) -> dict:
@@ -55,7 +57,7 @@ class Boundary:
         self.top = state["shape"]
 
 # ===================================== RectangularBoundary class =====================================
-class RectangularBoundary(Boundary):
+class RectangularBoundaryCondition(BoundaryCondition):
     """
     Class for the boundaries of rectangular shape of advection-reaction-diffusion systems.
 
@@ -101,7 +103,7 @@ class RectangularBoundary(Boundary):
         if side[0] not in ["Dirichlet", "Neumann"]:
             raise ValueError(f"Invalid boundary condition '{side[0]}': Valid conditions are 'Dirichlet' and 'Neumann'.")
 
-    def apply_conditions(self, rho: CellVariable, mesh: Grid2D | Gmsh2D) -> None:
+    def apply_conditions(self, rho: CellVariable, mesh: UniformGrid2D | NonUniformGrid2D | Gmsh2D) -> None:
         meshFaces = [mesh.facesLeft, mesh.facesRight, mesh.facesTop, mesh.facesBottom]
         sides = [self.left, self.right, self.top, self.bottom]
         for side, mesh_faces in zip(sides, meshFaces):
@@ -140,7 +142,7 @@ class RectangularBoundary(Boundary):
         self.right = state["right"]
 
 # ===================================== CircularBoundary class =====================================
-class CircularBoundary(Boundary):
+class CircularBoundaryCondition(BoundaryCondition):
     """
     Class for the boundaries of circular shape of advection-reaction-diffusion systems.
 
@@ -170,7 +172,7 @@ class CircularBoundary(Boundary):
         if perimeter[0] not in ["Dirichlet", "Neumann"]:
             raise ValueError(f"Invalid boundary condition '{perimeter[0]}': Valid conditions are 'Dirichlet' and 'Neumann'.")
 
-    def apply_conditions(self, rho: CellVariable, mesh: Grid2D | Gmsh2D) -> None:
+    def apply_conditions(self, rho: CellVariable, mesh: UniformGrid2D | NonUniformGrid2D | Gmsh2D) -> None:
         mode, value = self.circumference
         if mode == "Neumann":
             rho.faceGrad.constrain(value, mesh.exteriorFaces)

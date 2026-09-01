@@ -359,5 +359,6 @@ class Source:
         return Source(
             mode="constant",
             center=(0.0, 0.0),
-            amp=0.0
+            amp=0.0,
+            sigma=1.0
         )

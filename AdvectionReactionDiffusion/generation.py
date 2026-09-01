@@ -8,8 +8,13 @@ This module implements data generation.
 import torch
 from torch.utils.data import ConcatDataset
 from phy_sys_dataset import PhySysDataset
-from typing import Callable, Set
-from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion, null_source, null_velocity_field
+from typing import Set
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
+from AdvectionReactionDiffusion.advection_velocity import Velocity
+from AdvectionReactionDiffusion.reaction_source import Source
+from AdvectionReactionDiffusion.boundary_condition import BoundaryCondition
+from AdvectionReactionDiffusion.initial_condition import InitialCondition
+
 from phy_sys_dataset import PhySysDataset
 from data_utils import get_uniform, get_grid
 from typing import Tuple, List
@@ -26,55 +31,13 @@ def sample_points(mode: str, n_samples: int, ranges: List[Tuple[float]], steps: 
     else:
         raise ValueError(f"Invalid mode '{mode}'. It must be in ['uniform', 'grid']")
 
-def help_rectangle() -> None:
-    print("""
-"x_range": Tuple[float, float],
-"y_range": Tuple[float, float],
-"dx": float
-    """)
-
-def help_rectangle_bc() -> None:
-    print("""
-"left": Tuple[str, float],
-"top": Tuple[str, float],
-"right": Tuple[str, float],
-"bottom": Tuple[str, float]
-    """)
-
-def help_circle() -> None:
-    print("""
-"cell_size": float,
-"radius": float
-    """)
-
-def help_circle_bc() -> None:
-    print("""
-"mode": str,
-"value": float
-    """)
-
-def help_ic() -> None:
-    print("""
-"gaussian": bool,
-"periodic_circles": bool,
-"periodic_valleys": bool,
-"periodic_stripes": bool,
-"periodic_grid": bool,
-"uniform_noise": bool,
-"u0": np.ndarray,
-"centers": List[Tuple[float, float]], "amps": List[float], "sigmas": List[float],
-"A": float, "Ax": float, "Ay": float,
-"B": float, "Bx": float, "By": float,
-"Cx": float, "Cy": float,
-"D": float,
-"min_noise": float, "max_noise": float
-    """)
-
 def generate_AdvectionReactionDiffusion(
         shape: str,
         spatial_region: dict,
-        bc: dict,
-        ic: dict,
+        #bc: dict,
+        #ic: dict,
+        bc: BoundaryCondition,
+        ic: InitialCondition,
 
         t0: float,
         tN: float,
@@ -83,18 +46,18 @@ def generate_AdvectionReactionDiffusion(
         n_samples: int,
         seed: int = 42,
 
-        velocity: Callable = None,
+        velocity: Velocity = None,
         diffusion_coeff: float = None,
-        source: Callable = None,
-        implicit_source: Callable = None,
+        source: Source = None,
+        implicit_source: Source = None,
 
         include_diffusion_coeff: bool = False,
         include_velocity_values: bool = False,
         include_source_values: bool = False,
         include_implicit_source_A: bool = False,
         include_implicit_source_B: bool = False,
-        A: float = None, # if the source is implicit and you want to save its params values
-        B: float = None, # if the source is implicit and you want to save its params values
+        #A: float = None, # if the source is implicit and you want to save its params values
+        #B: float = None, # if the source is implicit and you want to save its params values
 
         include_bc: bool = False,
 
@@ -107,11 +70,11 @@ def generate_AdvectionReactionDiffusion(
 ) -> PhySysDataset:
 
     if velocity is None:
-        velocity = null_velocity_field()
+        velocity = Velocity.null_velocity()
     if source is None:
-        source = null_source()
+        source = Source.null_source()
     if implicit_source is None:
-        implicit_source = null_source()
+        implicit_source = Source.null_source()
     if diffusion_coeff is None:
         diffusion_coeff = 0.0
 
@@ -123,8 +86,10 @@ def generate_AdvectionReactionDiffusion(
     )
 
     pde.set_spatial_points(mode=shape, **spatial_region)
-    pde.set_IC(**ic)
-    pde.set_BC(**bc)
+    #pde.set_IC(**ic)
+    #pde.set_BC(**bc)
+    pde.set_IC(initial_condition=ic)
+    pde.set_BC(boundary_condition=bc)
     pde.solve(
         t0=t0, tN=tN, dt=dt, 
         n_samples=n_samples,
@@ -151,8 +116,8 @@ def generate_AdvectionReactionDiffusion(
                 velocity = pde.trajectory.velocity[i]
                 source = pde.trajectory.source[i]
             else:
-                x = pde.trajectory._x
-                y = pde.trajectory._y
+                x = pde.trajectory.x_full
+                y = pde.trajectory.y_full
                 u = pde.trajectory.f_full[i]
                 if shape == "rectangle":
                     du = pde.trajectory.df_full[i]
@@ -160,7 +125,7 @@ def generate_AdvectionReactionDiffusion(
                 velocity = pde.trajectory.velocity_full[i]
                 source = pde.trajectory.source_full[i]
 
-            t = time.repeat(len(x))
+            t = torch.Tensor(time.repeat(len(x)))
             spacetime = torch.stack([x, y, t], dim=1)
 
             params = []
@@ -180,15 +145,15 @@ def generate_AdvectionReactionDiffusion(
                 params.append(source)
                 param_keys.append("s")
             if include_implicit_source_A:
-                if A is None:
+                if implicit_source.A is None:
                     raise ValueError(f"Missing implicit source param 'A'.")
-                a = torch.tensor(A).repeat(len(x))
+                a = torch.tensor(implicit_source.A).repeat(len(x))
                 params.append(a)
                 param_keys.append("A")
             if include_implicit_source_B:
-                if B is None:
+                if implicit_source.B is None:
                     raise ValueError(f"Missing implicit source param 'B'.")
-                b = torch.tensor(B).repeat(len(x))
+                b = torch.tensor(implicit_source.B).repeat(len(x))
                 params.append(b)
                 param_keys.append("B")
 
@@ -198,9 +163,9 @@ def generate_AdvectionReactionDiffusion(
             bcs = None
             if include_bc:
                 if shape == "rectangle":
-                    bcs = torch.tensor([bc[key][1] for key in ["left", "top", "right", "bottom"]]).repeat(len(x), 1)
+                    bcs = torch.tensor([bc.left[1], bc.top[1], bc.right[1], bc.bottom[1]]).repeat(len(x), 1)
                 elif shape == "circle":
-                    bcs = torch.tensor(bc["value"]).repeat(len(x), 1)
+                    bcs = torch.tensor(bc.circumference[1]).repeat(len(x), 1)
                 else:
                     raise ValueError(f"Unknown domain shape '{shape}'.")
 
@@ -290,9 +255,10 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         y_range: Tuple[float],
         t_range: Tuple[float],
         
-        velocity: Callable = None,
+        velocity: Velocity = None,
         diffusion_coeff: float = None,
-        source: Callable = None,
+        source: Source = None,
+        implicit_source: Source = None,
 
         shape: str = None,
         bc: dict = None,
@@ -302,8 +268,8 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         include_source_values: bool = False,
         include_implicit_source_A: bool = False,
         include_implicit_source_B: bool = False,
-        A: float = None, # if the source is implicit and you want to save its params values
-        B: float = None, # if the source is implicit and you want to save its params values
+        #A: float = None, # if the source is implicit and you want to save its params values
+        #B: float = None, # if the source is implicit and you want to save its params values
 
         include_bc: bool = False,
         dx: float = None, dt: float = None,
@@ -337,22 +303,22 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         params.append(s)
         param_keys.append("s")
     if include_implicit_source_A:
-        if A is None:
+        if implicit_source.A is None:
             raise ValueError(f"Missing implicit source param 'A'.")
-        a = torch.flatten(torch.tensor(A).repeat(len(x), 1))
+        a = torch.flatten(torch.tensor(implicit_source.A).repeat(len(x), 1))
         params.append(a)
         param_keys.append("A")
     if include_implicit_source_B:
-        if B is  None:
+        if implicit_source.B is  None:
             raise ValueError(f"Missing implicit source param 'B'.")
-        b = torch.flatten(torch.tensor(B).repeat(len(x), 1))
+        b = torch.flatten(torch.tensor(implicit_source.B).repeat(len(x), 1))
         params.append(b)
         param_keys.append("B")
     if params != []:
         params = torch.stack(params, dim=1)
 
     bcs = None
-    if include_bc:
+    if include_bc:#TODO
         if shape == "rectangle":
             bcs = torch.tensor([bc[key][1] for key in ["left", "top", "right", "bottom"]]).repeat(len(x), 1)
         elif shape == "circle":
