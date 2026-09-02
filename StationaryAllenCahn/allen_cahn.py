@@ -14,7 +14,7 @@ Global parameters:
 - FORCE_PARAMS [list] (xi): default force values
 
 Classes:
-- AllenCahn: Implements the Allen-Cahn PDE logic and methods required by the interface module pde_utils.py.
+- AllenCahn: Implements the Allen-Cahn PDE logic and methods.
 """
 
 import torch
@@ -33,17 +33,17 @@ class AllenCahn:
         PDE parameter that indicates the thickness of the considered surface.
     force_params : list
         PDE parameters describing the forces in the system.
-    x : float
+    x : torch.Tensor
         x coordinates of the domain points.
-    y : float
+    y : torch.Tensor
         y coordinates of the domain points.
-    u : np.ndarray
+    u : torch.Tensor
         Solution values.
-    du : np.ndarray
+    du : torch.Tensor
      1st derivative values.
-    d2u : np.ndarray
+    d2u : torch.Tensor
         2nd derivative values.
-    force : np.ndarray
+    force : torch.Tensor
         Force values.
     """
     def __init__(self, lam: float = None, force_params: list = None):
@@ -75,27 +75,15 @@ class AllenCahn:
         Parameters
         ----------
         x : torch.Tensor
-            x coordinates.
+            x-coordinates.
         y : torch.Tensor
-            y coordinates.
-        
-        Returns
-        -------
-        None
+            y-coordinates.
         """
         self.x, self.y = x, y
 
     def solve(self) -> None:
         """
-        Compute the solution of the Allen-Cahn PDE on the spatial points.
-
-        Parameters
-        ----------
-        _
-
-        Returns
-        -------
-        None
+        Compute the solution of the Allen-Cahn PDE on the domain points.
         """
         self.u = self._sol()
         self.du = self._der()
@@ -103,32 +91,8 @@ class AllenCahn:
         uxx = self.d2u[:, 0]
         uyy = self.d2u[:, 1]
         self.force = self.lam * (uxx + uyy) + self.u ** 3 - self.u
-
-    #def compute_force(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    #    """
-    #    Compute the force at the given spatial points.
-#
-    #    Parameters
-    #    ----------
-    #    x : torch.Tensor
-    #    y : torch.Tensor
-#
-    #    Returns
-    #    -------
-    #    torch.Tensor
-    #        Force values at the given spatial points.
-    #    """
-    #    self.x = x
-    #    self.y = y
-    #    u = self._sol()
-    #    d2u = self._hes()
-    #    uxx = d2u[:, 0]
-    #    uyy = d2u[:, 1]
-    #    force = self.lam * (uxx + uyy) + u ** 3 - u
-    #    return force
     
     @classmethod
-    #def residual(cls, u: torch.Tensor, d2u: torch.Tensor, force: torch.Tensor, lam: float) -> torch.Tensor:
     def residual(cls, u: torch.Tensor, d2u: torch.Tensor, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
         """
         Compute the residual.
@@ -141,8 +105,8 @@ class AllenCahn:
             1st derivative values.
         d2u : torch.Tensor
             2nd derivative values.
-        force : torch.Tensor
-            Force values.
+        force_params : torch.Tensor
+            Force parameters.
         lam : float
             Thickness parameter.
 
@@ -153,31 +117,29 @@ class AllenCahn:
         """
         uxx = d2u[:, 0]
         uyy = d2u[:, 1]
-        force = AllenCahn._force(x=x, y=y, lam=lam, force_params=force_params)
+        force = AllenCahn.force(x=x, y=y, lam=lam, force_params=force_params)
         return lam * (uxx + uyy) - u + u ** 3 - force
 
     @classmethod
-    def _force(cls, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
+    def force(cls, x: torch.Tensor, y: torch.Tensor, lam: float, force_params: torch.Tensor) -> torch.Tensor:
         """
-        Compute the residual.
+        Compute the force.
 
         Parameters
         ----------
-        u : torch.Tensor
-            Solution values.
-        du : torch.Tensor
-            1st derivative values.
-        d2u : torch.Tensor
-            2nd derivative values.
-        force : torch.Tensor
-            Force values.
+        x : torch.Tensor
+            x-coordinates.
+        y : torch.Tensor
+            y-coordinates.
         lam : float
             Thickness parameter.
+        force_params : torch.Tensor
+            Force parameters.
 
         Returns
         -------
         torch.Tensor
-            Residual values.
+            Force values.
         """
         if len(force_params) == 1:
             u = torch.exp(- force_params[0] * (x + 0.7)) * torch.sin(torch.pi * x) * torch.sin(torch.pi * y)
@@ -204,6 +166,8 @@ class AllenCahn:
 
     def _sol(self) -> torch.Tensor:
         """
+        Computes the solution function scalar field.
+
         Returns
         -------
         torch.Tensor
@@ -220,6 +184,8 @@ class AllenCahn:
 
     def _der(self) -> torch.Tensor:
         """
+        Computes the solution spatial gradient vector field.
+
         Returns
         -------
         torch.Tensor
@@ -241,6 +207,8 @@ class AllenCahn:
 
     def _hes(self) -> torch.Tensor:
         """
+        Computes the solution 2nd spatial derivatives.
+        
         Returns
         -------
         torch.Tensor

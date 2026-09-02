@@ -2,7 +2,7 @@
 generate.py
 ===========
 
-This module implements data generation.
+This module implements data generation for stationary Allen-Cahn systems.
 """
 
 import torch

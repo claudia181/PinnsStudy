@@ -2,7 +2,7 @@
 generate.py
 ===========
 
-This module implements data generation.
+This module implements data generation for advection-reaction-diffusion systems.
 """
 
 import torch
@@ -261,17 +261,13 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         implicit_source: Source = None,
 
         shape: str = None,
-        bc: dict = None,
+        bc: BoundaryCondition = None,
 
-        include_diffusion_coeff: bool = False,
-        include_velocity_values: bool = False,
-        include_source_values: bool = False,
         include_implicit_source_A: bool = False,
         include_implicit_source_B: bool = False,
         #A: float = None, # if the source is implicit and you want to save its params values
         #B: float = None, # if the source is implicit and you want to save its params values
 
-        include_bc: bool = False,
         dx: float = None, dt: float = None,
         seed: int = 42
 ) -> PhySysDataset:
@@ -279,6 +275,11 @@ def generate_AdvectionReactionDiffusion_unlabeled(
     x = X[:, 0]
     y = X[:, 1]
     t = X[:, 2]
+
+    include_diffusion_coeff = (diffusion_coeff != None)
+    include_velocity_values = (velocity != None)
+    include_source_values = (source != None)
+    include_bc = (bc != None)
     
     params = []
     param_keys = []
@@ -287,8 +288,6 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         params.append(diff_coeff)
         param_keys.append("D")
     if include_velocity_values:
-        if velocity is None:
-            raise ValueError(f"Missing velocity vector field.")
         vx, vy = velocity(x, y, t)
         vx = torch.from_numpy(vx)
         vy = torch.from_numpy(vy)
@@ -297,36 +296,31 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         param_keys.append("vx")
         param_keys.append("vy")
     if include_source_values:
-        if source is None:
-            raise ValueError(f"Missing source scalar field.")
         s = source(x, y, t)
         params.append(s)
         param_keys.append("s")
     if include_implicit_source_A:
-        if implicit_source.A is None:
-            raise ValueError(f"Missing implicit source param 'A'.")
         a = torch.flatten(torch.tensor(implicit_source.A).repeat(len(x), 1))
         params.append(a)
         param_keys.append("A")
     if include_implicit_source_B:
-        if implicit_source.B is  None:
-            raise ValueError(f"Missing implicit source param 'B'.")
         b = torch.flatten(torch.tensor(implicit_source.B).repeat(len(x), 1))
         params.append(b)
         param_keys.append("B")
-    if params != []:
-        params = torch.stack(params, dim=1)
 
     bcs = None
-    if include_bc:#TODO
+    if include_bc:
         if shape == "rectangle":
-            bcs = torch.tensor([bc[key][1] for key in ["left", "top", "right", "bottom"]]).repeat(len(x), 1)
+            bcs = torch.tensor([bc.left[1], bc.top[1], bc.right[1], bc.bottom[1]]).repeat(len(x), 1)
         elif shape == "circle":
-            bcs = torch.tensor(bc["value"]).repeat(len(x), 1)
+            bcs = torch.tensor(bc.circumference[1]).repeat(len(x), 1)
         else:
             raise ValueError(f"Unknown domain shape '{shape}'.")
         
-    if params != [] and bcs is not None:
+    if params != []:
+        params = torch.stack(params, dim=1)
+        
+    if params != [] and include_bc:
         dataset = PhySysDataset([
             ("spacetime", X), 
             ("param", params), 
@@ -341,7 +335,7 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             ("param", params)
         ])
         dataset.set_subkeys("param", param_keys)
-    elif bcs is not None:
+    elif include_bc:
         dataset = PhySysDataset([
             ("spacetime", X),
             ("bc", bcs)
