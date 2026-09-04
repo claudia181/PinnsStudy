@@ -32,7 +32,6 @@ from typing import Callable
 import torch
 from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
 from StationaryAllenCahn.allen_cahn import AllenCahn
-from model import Pinn
 from typing import List, Self
 from AdvectionReactionDiffusion.advection_velocity import Velocity
 from AdvectionReactionDiffusion.reaction_source import Source
@@ -43,9 +42,9 @@ class PhysicsTask:
     def __init__(
             self,
             task_id: str = None,
-            input_param_indexes: List[int] = None,
+            parameters: dict = None,
             weight: float = None
-    ) -> None:
+    ):
         """
         Constructor.
 
@@ -54,16 +53,12 @@ class PhysicsTask:
         task_id : str
             Task identifier.
         parameters : dict = None
-            Set of fixed parameters.
+            Dictionary of fixed parameters {..., "param_name": param_value, ...}.
         weight : float = None
             Current weight of the task (it weights the task loss term in the multi-objective loss function).
-
-        Returns
-        -------
-        _None_
         """
         self.id = task_id
-        self.input_param_indexes = input_param_indexes
+        self.parameters = parameters
         self.weight = weight
         self.grad_norm = None
         self.grad = None
@@ -95,7 +90,7 @@ class PhysicsTask:
         """
         return {
             "id": self.id,
-            "input_param_indexes": self.input_param_indexes,
+            "parameters": self.parameters,
             "weight": self.weight,
             "grad": self.grad,
             "grad_norm": self.grad_norm,
@@ -114,7 +109,7 @@ class PhysicsTask:
         """
         if self.id != state["id"]:
             raise TypeError(f"Physics task type mismatch: {self.id} != {state['id']}.")
-        self.input_param_indexes = state["input_param_indexes"]
+        self.parameters = state["parameters"]
         self.weight = state["weight"]
         self.grad = state["grad"]
         self.grad_norm = state["grad_norm"]
@@ -154,10 +149,19 @@ class NeumannBCTask(PhysicsTask):
     Task for Neumann boundary conditions.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, parameters: dict = None, weight: float = None):
+        """
+        Parameters
+        ----------
+        parameters : dict
+            - rectangular domain: {"top_flux": top_flux_value, "right_flux": right_flux_value, ...}
+            - circular domain: {"flux": flux_value}
+        weight : int
+            Weight of the task in the loss.
+        """
         super().__init__(
             task_id="NeumannBC",
-            input_param_indexes=input_param_indexes,
+            parameters=parameters,
             weight=weight
         )
 
@@ -168,19 +172,6 @@ class NeumannBCTask(PhysicsTask):
         """
         outward_flux = (du[:, :2] * n).sum(dim=1)
         return outward_flux
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, du: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted outward flux and the wanted outward flux.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
-        return mse_loss(self.out_flux(du=du_pred, n=n), self.out_flux(du=du, n=n))
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -202,25 +193,21 @@ class DirichletBCTask(PhysicsTask):
     Task for Dirichlet boundary conditions.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, parameters: dict = None, weight: float = None):
+        """
+        Parameters
+        ----------
+        parameters : dict
+            - rectangular domain: {"top_u": top_u, "right_u": right_u, ...}
+            - circular domain: {"u": u}
+        weight : int
+            Weight of the task in the loss.
+        """
         super().__init__(
             task_id="DirichletBC",
-            input_param_indexes=input_param_indexes,
+            parameters=parameters,
             weight=weight
         )
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted boundary value and the wanted boundary value.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        u_pred = model.forward(x=x, pde_params=input_params)
-        return mse_loss(u_pred, u)
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -242,25 +229,12 @@ class ICTask(PhysicsTask):
     Task for initial conditions.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, parameters: dict = None, weight: float = None):
         super().__init__(
             task_id="IC",
-            input_param_indexes=input_param_indexes,
+            parameters=parameters,
             weight=weight
         )
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted initial state field and the wanted initial state field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        u_pred = model.forward(x=x, pde_params=input_params)
-        return mse_loss(u_pred, u)
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -282,26 +256,12 @@ class OutputTask(PhysicsTask):
     Task for output learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, weight: float = None):
         
         super().__init__(
             task_id="Output",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, u: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted u field and the wanted u field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        u_pred = model.forward(x=x, pde_params=input_params)
-        return mse_loss(u_pred, u)
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -323,25 +283,11 @@ class DerivativeTask(PhysicsTask):
     Task for 1st derivative learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, weight: float = None):
         super().__init__(
             task_id="Derivative",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted du field and the wanted du field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
-        return mse_loss(du_pred, du)
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -363,25 +309,11 @@ class SpatialDerivativeTask(PhysicsTask):
     Task for 1st spatial derivative learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, weight: float = None):
         super().__init__(
             task_id="Derivative_x",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted du_xy field and the wanted du_xy field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
-        return mse_loss(du_pred[:, :2], du[:, :2])
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -403,26 +335,12 @@ class TemporalDerivativeTask(PhysicsTask):
     Task for 1st tempporal derivative learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None,  weight: float = None): 
+    def __init__(self, weight: float = None): 
         super().__init__(
             task_id="Derivative_t",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
 
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, du: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted du_t field and the wanted du_t field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
-        return mse_loss(du_pred[:, 2:], du[:, 2:])
-    
     def loss_required_labels(self) -> List[str]:
         """
         Function returning the keys of the set of labels necessary to compute the loss term of the task.
@@ -443,26 +361,12 @@ class Derivative2Task(PhysicsTask):
     Task for 2nd derivative learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, weight: float = None):
         super().__init__(
             task_id="Derivative2",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
 
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted d2u field and the wanted d2u field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
-        return mse_loss(d2u_pred, d2u)
-    
     def loss_required_labels(self) -> List[str]:
         """
         Function returning the keys of the set of labels necessary to compute the loss term of the task.
@@ -483,26 +387,12 @@ class SpatialDerivative2Task(PhysicsTask):
     Task for 2nd spatial derivative learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, weight: float = None):
         super().__init__(
             task_id="Derivative2_x",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
 
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted [d2u_xx, d2u_yy, d2u_xy] field and the wanted [d2u_xx, d2u_yy, d2u_xy] field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
-        return mse_loss(d2u_pred[:, :2], d2u[:, :2]) # mse_loss(d2u_pred[:, :2, :2], d2u[:, :2, :2])
-    
     def loss_required_labels(self) -> List[str]:
         """
         Function returning the keys of the set of labels necessary to compute the loss term of the task.
@@ -523,27 +413,13 @@ class TemporalDerivative2Task(PhysicsTask):
     Task for 2nd temporal derivative learning.
     """
 
-    def __init__(self, input_param_indexes: List[int] = None, weight: float = None):
+    def __init__(self, weight: float = None):
         
         super().__init__(
             task_id="Derivative2_t",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
 
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted d2u_tt field and the wanted d2u_tt field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
-        return mse_loss(d2u_pred[:, 2], d2u[:, 2]) # mse_loss(d2u_pred[:, 2, 2], d2u[:, 2, 2])
-    
     def loss_required_labels(self) -> List[str]:
         """
         Function returning the keys of the set of labels necessary to compute the loss term of the task.
@@ -566,7 +442,6 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
 
     def __init__(self,
             param_keys: List[str] = [],
-            input_param_indexes: List[int] = None,
             velocity: Velocity = None,
             source: Source = None,
             implicit_source: Source = None,
@@ -574,7 +449,6 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
             weight: float = None
     ):
         self.param_keys = param_keys
-        self.input_param_indexes = input_param_indexes
 
         if velocity is None:
             self.velocity_fn = Velocity.null_velocity()
@@ -598,88 +472,8 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
 
         super().__init__(
             task_id="AdvectionReactionDiffusionGE",
-            input_param_indexes=input_param_indexes,
             weight=weight
         )
-
-    def loss(
-            self,
-            x: torch.Tensor,
-            pde_parameters: torch.Tensor,
-            model: Pinn
-    ) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted PDE residual field and the null field.
-        """
-        if len(self.param_keys) != len(pde_parameters):
-            raise ValueError(f"The number of expected PDE parameters is {len(self.param_keys)}, while {len(pde_parameters)} PDE parameters are passed.")
-
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-        
-        u = model.derivative(order=0, x=x, pde_params=input_params)
-        du = model.derivative(order=1, x=x, pde_params=input_params)
-        d2u = model.derivative(order=2, x=x, pde_params=input_params)
-        x_ = x[:, 0]
-        y = x[:, 1]
-        t = x[:, 2]
-
-        D_values = None
-        vx_values = None
-        vy_values = None
-        source_values = None
-        A_values = None
-        B_values = None
-        for key, value in zip(self.param_keys, pde_parameters):
-            if key == "D":
-                D_values = value
-            elif key == "vx":
-                vx_values = value
-            elif key == "vy":
-                vy_values = value
-            elif key == "s":
-                source_values = value
-            elif key == "A":
-                A_values = value
-            elif key == "B":
-                B_values = value
-
-        if D_values is None:
-            D_values = self.D
-
-        if source_values is None:
-            source_values = self.source_fn(x=x_, y=y, t=t)
-        
-        if A_values is not None:
-            self.implicit_source_fn.set_A(A_values)
-        if B_values is not None:
-            self.implicit_source_fn.set_B(B_values)
-        implicit_source_values = self.implicit_source_fn(u=u)
-
-        if vx_values is None or vy_values is None:
-            velocity_values = self.velocity_fn(x=x_, y=y, t=t)
-            if vx_values is not None and vy_values is None:
-                velocity_values = torch.stack((vx_values, velocity_values[:, 1]), dim=1)
-            elif vx_values is None and vy_values is not None:
-                velocity_values = torch.stack((velocity_values[:, 0], vy_values), dim=1)
-        else:
-            velocity_values = torch.stack((vx_values, vy_values))
-        
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        
-        residual_value = AdvectionReactionDiffusion.residual(
-            du=du, 
-            d2u=d2u, 
-            velocity=velocity_values, 
-            source=source_values, 
-            implicit_source=implicit_source_values, 
-            D=D_values
-        )
-
-        return mse_loss(residual_value, torch.zeros_like(residual_value))
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -696,7 +490,7 @@ class AdvectionReactionDiffusionTask(PhysicsTask):
         task.velocity = self.velocity
         return task
 
-    def state_dict(self):
+    def state_dict(self) -> dict:
         extra = {
             "D": self.D,
             "velocity_fn": self.velocity_fn.state_dict(),
@@ -733,49 +527,16 @@ class StationaryAllenCahnTask(PhysicsTask):
         self.xi_vector = xi_vector
         self.lam_index = lam_index
         self.xi_indexes = xi_indexes
-        input_param_indexes = []
-        if lam_index is not None:
-            input_param_indexes.append(lam_index)
-        if xi_indexes is not None:
-            input_param_indexes += xi_indexes#[i+1 for i in range(len(xi_vector))]
-        if input_param_indexes == []:
-            input_param_indexes = None
+        parameters = {
+            "xi_vector": self.xi_vector,
+            "lam": self.lam
+        }
+        
         super().__init__(
             task_id="StationaryAllenCahnGE",
-            input_param_indexes=input_param_indexes,
+            parameters=parameters,
             weight=weight
         )
-
-    def loss(self, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn) -> torch.Tensor:
-        """
-        Loss function giving the loss term of the task:
-        - MSE btw the predicted PDE residual field and the null field.
-        """
-        if self.input_param_indexes is not None:
-            input_params = pde_parameters[:, model.input_param_indexes]
-        else:
-            input_params = None
-
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-    
-        u = model.derivative(order=0, x=x, pde_params=input_params)
-        d2u = model.derivative(order=2, x=x, pde_params=input_params)
-
-        x_ = x[:, 0]
-        y = x[:, 1]
-
-        if self.lam_index is not None:
-            lam_values = pde_parameters[:, self.lam_index]
-        else:
-            lam_values = self.lam
-        if self.xi_indexes is not None:
-            xi_values = pde_parameters[:, self.xi_indexes]
-        else:
-            xi_values = self.xi_vector
-
-        residual_value = AllenCahn.residual(u=u, d2u=d2u, x=x_, y=y, lam=lam_values, force_params=xi_values)
-
-        return mse_loss(residual_value, torch.zeros_like(residual_value))
     
     def loss_required_labels(self) -> List[str]:
         """
@@ -793,9 +554,9 @@ class StationaryAllenCahnTask(PhysicsTask):
 
     def state_dict(self) -> dict:
         extra = {
-            "lam": self.lam,
+            #"lam": self.lam,
             "lam_index": self.lam_index,
-            "xi_vector": self.xi_vector,
+            #"xi_vector": self.xi_vector,
             "xi_indexes": self.xi_indexes
         }
         return super().state_dict() | extra

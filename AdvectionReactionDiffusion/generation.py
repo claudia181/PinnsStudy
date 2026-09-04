@@ -67,7 +67,7 @@ def generate_AdvectionReactionDiffusion(
         vmax: float = None,
         cmap: str = "inferno",
         figsize: tuple = (3.5, 3.5)
-) -> PhySysDataset:
+) -> Tuple[PhySysDataset, PhySysDataset]:
 
     if velocity is None:
         velocity = Velocity.null_velocity()

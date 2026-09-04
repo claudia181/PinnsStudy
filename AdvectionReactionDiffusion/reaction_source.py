@@ -354,11 +354,10 @@ class Source:
                 "A": self.A
             }
 
-    @classmethod
-    def null_source(cls) -> Self:
-        return Source(
-            mode="constant",
-            center=(0.0, 0.0),
-            amp=0.0,
-            sigma=1.0
-        )
+def null_source() -> Source:
+    return Source(
+        mode="constant",
+        center=(0.0, 0.0),
+        amp=0.0,
+        sigma=1.0
+    )

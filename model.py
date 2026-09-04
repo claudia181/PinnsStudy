@@ -15,10 +15,12 @@ from torch.func import vmap, jacrev, hessian
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 from torch.nn.utils import parameters_to_vector
-from physics_task import PhysicsTask
 from phy_sys_dataset import PhySysDataset
 from typing import Tuple, List, Self, Callable
 import os
+from physics_task import PhysicsTask, NeumannBCTask, DirichletBCTask, ICTask, OutputTask, DerivativeTask, SpatialDerivativeTask, TemporalDerivativeTask, Derivative2Task, SpatialDerivative2Task, TemporalDerivative2Task, AdvectionReactionDiffusionTask, StationaryAllenCahnTask
+from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
+from StationaryAllenCahn.allen_cahn import AllenCahn
 
 EWC_MODES = ["On", "Off"]
 DWA_MODES = ["Off", "Std", "Norm1", "NormK"]
@@ -140,6 +142,8 @@ class Pinn(torch.nn.Module):
             #loss_container: Callable = None,
             optimizer: torch.optim.Optimizer = None,
             lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
+
+            input_params_dict: dict = None,
             
             *args,
             **kwargs
@@ -285,6 +289,10 @@ class Pinn(torch.nn.Module):
 
         # The learning rate scheduler 
         self.lr_scheduler = lr_scheduler
+
+        self.input_params_dict = input_params_dict
+
+        self.evaluator = Evaluator()
 
     def _build_net(self) -> None:
         """
@@ -825,7 +833,7 @@ class Pinn(torch.nn.Module):
     def train_loss(
             self,
             x_list: List[torch.Tensor], # spatio-temporal input, for each task
-            input_param_list: List[torch.Tensor] = None, # physics parameters in input, for each task
+            pde_param_list: List[torch.Tensor] = None, # physics parameters in input, for each task
             labels: dict = None, # true labels, if some task needs (some of) them (dictionary of lists, where each list has one item for each task)
     ) -> torch.Tensor:
         """
@@ -849,7 +857,7 @@ class Pinn(torch.nn.Module):
             labels = {}
         for i, task in enumerate(self.train_task_list):
             x = x_list[i]
-            input_params = input_param_list[i]
+            pde_parameters = pde_param_list[i]
 
             l_dict = {}
             for key in labels.keys():
@@ -858,7 +866,7 @@ class Pinn(torch.nn.Module):
                 else:
                     raise ValueError("Missing input parameters")
             
-            task.loss_value = task.loss(x=x, input_params=input_params, model=self, **l_dict)
+            task.loss_value = self.evaluator(model=self, task=task, x=x, pde_parameters=pde_parameters, **l_dict) #task.loss(x=x, input_params=input_params, model=self, **l_dict)
 
         if self.dwa_mode != "Off" and self.dwa_moving_avg_count % self.dwa_moving_avg_frequency == 0 and self.dwa_moving_avg_count >= self.dwa_warm_up:
             self._update_task_weights()
@@ -889,7 +897,7 @@ class Pinn(torch.nn.Module):
     def eval_loss(
             self,
             x_list: List[torch.Tensor],
-            input_param_list: List[torch.Tensor] = None,
+            pde_param_list: List[torch.Tensor] = None,
             labels: dict = None
     ) -> torch.Tensor:
         """
@@ -913,7 +921,7 @@ class Pinn(torch.nn.Module):
             labels = {}
         for i, task in enumerate(self.eval_task_list):
             x = x_list[i]
-            input_params = input_param_list[i]
+            pde_parameters = pde_param_list[i]
 
             l_dict = {}
             for key in labels.keys():
@@ -922,7 +930,7 @@ class Pinn(torch.nn.Module):
                 else:
                     raise ValueError("Missing input parameters")
             
-            task.loss_value = task.loss(x=x, input_params=input_params, model=self, **l_dict)
+            task.loss_value = self.evaluator(model=self, task=task, x=x, pde_parameters=pde_parameters, **l_dict)#task.loss(x=x, input_params=input_params, model=self, **l_dict)
             self._update_eval_grad_norms()
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.eval_task_list])
@@ -1172,14 +1180,14 @@ class Pinn(torch.nn.Module):
             if optimizer_class == state["optimizer"].keys()[0]:
                 self.optimizer.load_state_dict(state["optimizer"][optimizer_class])
             else:
-                raise TypeError(f"Different optimizer class: {optimizer_class} != {state["optimizer"].keys()[0]}.")
+                raise TypeError(f"Different optimizer class: {optimizer_class} != {state['optimizer'].keys()[0]}.")
             
         if self.lr_scheduler is not None:
             lr_scheduler_class = self.lr_scheduler.__class__.__name__
             if lr_scheduler_class == state["lr_scheduler"].keys()[0]:
                 self.lr_scheduler.load_state_dict(state["lr_scheduler"][lr_scheduler_class])
             else:
-                raise TypeError(f"Different lr_scheduler class: {lr_scheduler_class} != {state["lr_scheduler"].keys()[0]}.")
+                raise TypeError(f"Different lr_scheduler class: {lr_scheduler_class} != {state['lr_scheduler'].keys()[0]}.")
 
 
     @staticmethod
@@ -1240,3 +1248,310 @@ class Pinn(torch.nn.Module):
                 ewc_warm_up=checkpoint["ewc_warm_up"],
                 ewc_decay=checkpoint["ewc_decay"]
             )
+
+class Evaluator:
+    """
+    """
+
+    def __init__(self):
+        pass
+
+    def __call__(self, model: Pinn, task: PhysicsTask, **kwargs) -> List[torch.Tensor]:
+        if type(task) is AdvectionReactionDiffusionTask:
+            return self._advection_reaction_diffusion_loss(model=model, task=task, **kwargs)
+        elif type(task) is StationaryAllenCahnTask:
+            return self._stationary_allen_cahn_loss(model=model, task=task, **kwargs)
+        elif type(task) is NeumannBCTask:
+            return self._neumann_bc_loss(model=model, task=task, **kwargs)
+        elif type(task) is DirichletBCTask:
+            return self._dirichlet_bc_loss(model=model, task=task, **kwargs)
+        elif type(task) is ICTask:
+            return self._ic_loss(model=model, task=task, **kwargs)
+        elif type(task) is OutputTask:
+            return self._output_loss(model=model, task=task, **kwargs)
+        elif type(task) is DerivativeTask:
+            return self._derivative_loss(model=model, task=task, **kwargs)
+        elif type(task) is SpatialDerivativeTask:
+            return self._spatial_derivative_loss(model=model, task=task, **kwargs)
+        elif type(task) is TemporalDerivativeTask:
+            return self._temporal_derivative_loss(model=model, task=task, **kwargs)
+        elif type(task) is Derivative2Task:
+            return self._derivative2_loss(model=model, task=task, **kwargs)
+        elif type(task) is SpatialDerivative2Task:
+            return self._spatial_derivative2_loss(model=model, task=task, **kwargs)
+        elif type(task) is TemporalDerivative2Task:
+            return self._temporal_derivative2_loss(model=model, task=task, **kwargs)
+        
+    @classmethod
+    def _advection_reaction_diffusion_loss(
+        cls,
+        x: torch.Tensor,
+        pde_parameters: torch.Tensor,
+        model: Pinn,
+        task: AdvectionReactionDiffusionTask
+    ) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted PDE residual field and the null field.
+        """
+        if len(task.param_keys) != len(pde_parameters):
+            raise ValueError(f"The number of expected PDE parameters is {len(task.param_keys)}, while {len(pde_parameters)} PDE parameters are passed.")
+
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        
+        u = model.derivative(order=0, x=x, pde_params=input_params)
+        du = model.derivative(order=1, x=x, pde_params=input_params)
+        d2u = model.derivative(order=2, x=x, pde_params=input_params)
+        x_ = x[:, 0]
+        y = x[:, 1]
+        t = x[:, 2]
+
+        D_values = None
+        vx_values = None
+        vy_values = None
+        source_values = None
+        A_values = None
+        B_values = None
+        for key, value in zip(task.param_keys, pde_parameters):
+            if key == "D":
+                D_values = value
+            elif key == "vx":
+                vx_values = value
+            elif key == "vy":
+                vy_values = value
+            elif key == "s":
+                source_values = value
+            elif key == "A":
+                A_values = value
+            elif key == "B":
+                B_values = value
+
+        if D_values is None:
+            D_values = task.D
+
+        if source_values is None:
+            source_values = task.source_fn(x=x_, y=y, t=t)
+        
+        if A_values is not None:
+            task.implicit_source_fn.set_A(A_values)
+        if B_values is not None:
+            task.implicit_source_fn.set_B(B_values)
+        implicit_source_values = task.implicit_source_fn(u=u)
+
+        if vx_values is None or vy_values is None:
+            velocity_values = task.velocity_fn(x=x_, y=y, t=t)
+            if vx_values is not None and vy_values is None:
+                velocity_values = torch.stack((vx_values, velocity_values[:, 1]), dim=1)
+            elif vx_values is None and vy_values is not None:
+                velocity_values = torch.stack((velocity_values[:, 0], vy_values), dim=1)
+        else:
+            velocity_values = torch.stack((vx_values, vy_values))
+        
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        
+        residual_value = AdvectionReactionDiffusion.residual(
+            du=du, 
+            d2u=d2u, 
+            velocity=velocity_values, 
+            source=source_values, 
+            implicit_source=implicit_source_values, 
+            D=D_values
+        )
+
+        return mse_loss(residual_value, torch.zeros_like(residual_value))
+
+    @classmethod
+    def _stationary_allen_cahn_loss(
+        cls, 
+        x: torch.Tensor, 
+        pde_parameters: torch.Tensor, 
+        model: Pinn,
+        task: StationaryAllenCahnTask
+    ) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted PDE residual field and the null field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+    
+        u = model.derivative(order=0, x=x, pde_params=input_params)
+        d2u = model.derivative(order=2, x=x, pde_params=input_params)
+
+        x_ = x[:, 0]
+        y = x[:, 1]
+
+        if task.lam_index is not None:
+            lam_values = pde_parameters[:, task.lam_index]
+        else:
+            lam_values = task.lam
+        if task.xi_indexes is not None:
+            xi_values = pde_parameters[:, task.xi_indexes]
+        else:
+            xi_values = task.xi_vector
+
+        residual_value = AllenCahn.residual(u=u, d2u=d2u, x=x_, y=y, lam=lam_values, force_params=xi_values)
+
+        return mse_loss(residual_value, torch.zeros_like(residual_value))
+
+    @classmethod
+    def _neumann_bc_loss(
+        cls, 
+        x: torch.Tensor, 
+        pde_parameters: torch.Tensor, 
+        model: Pinn, 
+        task: NeumannBCTask,
+        du: torch.Tensor, 
+        n: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted outward flux and the wanted outward flux.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
+        return mse_loss(task.out_flux(du=du_pred, n=n), task.out_flux(du=du, n=n))
+
+    @classmethod
+    def _dirichlet_bc_loss(
+        cls, 
+        x: torch.Tensor, 
+        pde_parameters: torch.Tensor, 
+        model: Pinn, 
+        task: DirichletBCTask,
+        u: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted boundary value and the wanted boundary value.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        u_pred = model.forward(x=x, pde_params=input_params)
+        return mse_loss(u_pred, u)
+
+    @classmethod
+    def _ic_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: ICTask, u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted initial state field and the wanted initial state field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        u_pred = model.forward(x=x, pde_params=input_params)
+        return mse_loss(u_pred, u)
+
+    @classmethod
+    def _output_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: OutputTask, u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted u field and the wanted u field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        u_pred = model.forward(x=x, pde_params=input_params)
+        return mse_loss(u_pred, u)
+
+    @classmethod
+    def _derivative_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: DerivativeTask, du: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted du field and the wanted du field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
+        return mse_loss(du_pred, du)
+
+    @classmethod
+    def _spatial_derivative_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: SpatialDerivativeTask, du: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted du_xy field and the wanted du_xy field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
+        return mse_loss(du_pred[:, :2], du[:, :2])
+
+    @classmethod
+    def _temporal_derivative_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: TemporalDerivativeTask, du: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted du_t field and the wanted du_t field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        du_pred = model.derivative(order=1, x=x, pde_params=input_params)
+        return mse_loss(du_pred[:, 2:], du[:, 2:])
+
+    @classmethod
+    def _derivative2_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: Derivative2Task, d2u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted d2u field and the wanted d2u field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
+        return mse_loss(d2u_pred, d2u)
+
+    @classmethod
+    def _spatial_derivative2_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, task: SpatialDerivative2Task, d2u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted [d2u_xx, d2u_yy, d2u_xy] field and the wanted [d2u_xx, d2u_yy, d2u_xy] field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
+        return mse_loss(d2u_pred[:, :2], d2u[:, :2]) # mse_loss(d2u_pred[:, :2, :2], d2u[:, :2, :2])
+
+    @classmethod
+    def _temporal_derivative2_loss(cls, x: torch.Tensor, pde_parameters: torch.Tensor, model: Pinn, d2u: torch.Tensor) -> torch.Tensor:
+        """
+        Loss function giving the loss term of the task:
+        - MSE btw the predicted d2u_tt field and the wanted d2u_tt field.
+        """
+        if model.input_param_dict is not None:
+            input_params = pde_parameters[:, list(model.input_param_dict.values())]
+        else:
+            input_params = None
+        mse_loss = torch.nn.MSELoss(reduction='mean')
+        d2u_pred = model.derivative(order=2, x=x, pde_params=input_params)
+        return mse_loss(d2u_pred[:, 2], d2u[:, 2]) # mse_loss(d2u_pred[:, 2, 2], d2u[:, 2, 2])
