@@ -62,10 +62,19 @@ class Pinn(torch.nn.Module):
             True if training gradient conflicts are monitored.
         loss_container : callable
             The loss function (nn.MSELoss(reduction='mean')).
-        net : the NN.
+        net : Sequential
+            The NN.
+        optimizer : torch.optim.Optimizer
+            The optimizer to train the model.
+        lr_scheduler : torch.optim.lr_scheduler.LRScheduler
+            Learning rate scheduler to train the model.
+        input_params_dict : dict
+            Dictionary of the system parameters in input to the model.
+        evaluator : Evaluator
+            Evaluator object for the task specific loss.
 
-    Dynamic weight adaptation
-    -------------------------
+    Dynamic weight adaptation attrubutes
+    ------------------------------------
         dwa_mode : str
             Identifier of the training loss weighting schema used (in ["Off", "Std", "Norm1", or "NormK"]).
         dwa_alpha : float
@@ -75,8 +84,8 @@ class Pinn(torch.nn.Module):
         dwa_warm_up : int
             Number of steps to wait before starting DWA.
 
-    Fourier feature encoding
-    ------------------------
+    Fourier feature encoding attrubutes
+    -----------------------------------
         ff_encoding : bool
             True if ff encoding is applied.
         B : torch.Tensor
@@ -86,8 +95,8 @@ class Pinn(torch.nn.Module):
         frequency_variance : float
             Variance for B items sampling.
         
-    Elastic weight consolidation
-    ----------------------------
+    Elastic weight consolidation attributes
+    ---------------------------------------
         ewc : bool
             True is EWC regularization is used for training.
         ewc_frictioning_weights : torch.Tensor
@@ -102,9 +111,57 @@ class Pinn(torch.nn.Module):
             Number of steps to wait before starting applying EWC regularization in training.
         ewc_decay : float
             Decay factor for the EWC term in the loss function.
+    
+    **Methods**
+    -----------
+    
+    Private methods
+    ---------------
+        Model architecture:
+            - _build_net
+        Computation of gradient norm:
+            - _compute_grad_norm
+        Updaters:
+            - _update_conflicts
+            - _update_task_weights
+            - _update_train_grad_norms
+            - _update_eval_grad_norms
+    
+    Public methods
+    --------------
+        Setters:
+            - set_ff
+            - sample_B_and_set_ff
+            - set_dwa
+            - set_ewc
+            - set_conflict_monitoring
+            - set_weights
+
+        Inference:
+            - forward
+            - derivative
+
+        Losses:
+            - train_loss
+            - eval_loss
+
+        Label a dataset:
+            - label
+
+        Get DiagFIM:
+            - get_fisher_diag
+
+        State methods:
+            - load_state_dict
+            - state_dict
+            - get_extra_state
+            - set_extra_state
+
+        Load/store:
+            - save
+            - load
     """
-    def load_state_dict(self, state_dict, strict = True, assign = False):
-        return super().load_state_dict(state_dict, strict, assign)
+
     def __init__(
             self,
             device: str = "cpu",
@@ -113,6 +170,11 @@ class Pinn(torch.nn.Module):
             spatial_input: int = 2,
             param_input: int = 0,
             hidden_units: List[int] = [],
+
+            dwa_mode: str = "Off", 
+            dwa_alpha: float = None, 
+            dwa_moving_avg_frequency: int = None, 
+            dwa_warm_up: int = None,
 
             ff_encoding: bool = False,
             B: torch.Tensor = None,
@@ -128,11 +190,6 @@ class Pinn(torch.nn.Module):
             ewc_frictioning_weights: torch.Tensor = None, 
             ewc_fisher_diagonal: torch.Tensor = None,
 
-            dwa_mode: str = "Off", 
-            dwa_alpha: float = None, 
-            dwa_moving_avg_frequency: int = None, 
-            dwa_warm_up: int = None,
-
             train_task_list: List[PhysicsTask] = [],
             eval_task_list: List[PhysicsTask] = [],
 
@@ -147,7 +204,7 @@ class Pinn(torch.nn.Module):
             
             *args,
             **kwargs
-        ) -> None:
+    ):
         """
         Constructor initializing the PINN.
 
@@ -164,10 +221,41 @@ class Pinn(torch.nn.Module):
             Number of parametrization dimensions in input.
         hidden_units : List[int]
             List of the hidden units of the model.
-        
-        Returns
-        -------
-        _None_
+        *DWA*
+        dwa_mode : str
+            Identifier of the training loss weighting schema used (in ["Off", "Std", "Norm1", or "NormK"]).
+        dwa_alpha : float
+            DWA moving avg factor.
+        dwa_moving_avg_frequency : int
+            DWA weights updating frequency.
+        dwa_warm_up : int
+            Number of steps to wait before starting DWA.
+        *Fourier features*
+        ff_encoding : bool
+            True if ff encoding is applied.
+        B : torch.Tensor
+            Frequency matrix for the random ff encoding.
+        fourier_features : int
+            Number of Fourier features of the ff encoding.
+        B_gen_frequency_variance : float
+            Variance for B items sampling.
+        B_gen_seed : int
+            Seed for B matrix generation.
+        *EWC*
+        ewc : bool
+            True is EWC regularization is used for training.
+        ewc_frictioning_weights : torch.Tensor
+            Vector of weights of the EWC model.
+        ewc_fisher_diag : torch.Tensor
+            Diagonal of the FIM for EWC regularization.
+        ewc_weight : float
+            Weight of the EWC term in the loss function.
+        ewc_auto_weighting : bool
+            True -> EWC auto weighting application.
+        ewc_warm_up : int
+            Number of steps to wait before starting applying EWC regularization in training.
+        ewc_decay : float
+            Decay factor for the EWC term in the loss function.
         """
         super().__init__(*args, **kwargs)
         
@@ -720,7 +808,7 @@ class Pinn(torch.nn.Module):
         self,
         task_list: List[PhysicsTask],
         reference_task: PhysicsTask
-        ) -> torch.Tensor:
+        ) -> None:
         """
         Compute the cosine similarity (the cosine of the angle) \n
         btw the gradients of the losses of each task in `task_list` and the gradient of `reference_task`\n
@@ -859,14 +947,14 @@ class Pinn(torch.nn.Module):
             x = x_list[i]
             pde_parameters = pde_param_list[i]
 
-            l_dict = {}
+            labels_for_task = {}
             for key in labels.keys():
                 if key in task.loss_required_labels():
-                    l_dict[key] = labels[key][i]
+                    labels_for_task[key] = labels[key][i]
                 else:
                     raise ValueError("Missing input parameters")
             
-            task.loss_value = self.evaluator(model=self, task=task, x=x, pde_parameters=pde_parameters, **l_dict) #task.loss(x=x, input_params=input_params, model=self, **l_dict)
+            task.loss_value = self.evaluator(model=self, task=task, x=x, pde_parameters=pde_parameters, **labels_for_task) #task.loss(x=x, input_params=input_params, model=self, **l_dict)
 
         if self.dwa_mode != "Off" and self.dwa_moving_avg_count % self.dwa_moving_avg_frequency == 0 and self.dwa_moving_avg_count >= self.dwa_warm_up:
             self._update_task_weights()
@@ -923,14 +1011,14 @@ class Pinn(torch.nn.Module):
             x = x_list[i]
             pde_parameters = pde_param_list[i]
 
-            l_dict = {}
+            labels_for_task = {}
             for key in labels.keys():
                 if key in task.loss_required_labels():
-                    l_dict[key] = labels[key][i]
+                    labels_for_task[key] = labels[key][i]
                 else:
                     raise ValueError("Missing input parameters")
             
-            task.loss_value = self.evaluator(model=self, task=task, x=x, pde_parameters=pde_parameters, **l_dict)#task.loss(x=x, input_params=input_params, model=self, **l_dict)
+            task.loss_value = self.evaluator(model=self, task=task, x=x, pde_parameters=pde_parameters, **labels_for_task)#task.loss(x=x, input_params=input_params, model=self, **l_dict)
             self._update_eval_grad_norms()
 
         weighted_loss = sum([task.weight * task.loss_value for task in self.eval_task_list])
@@ -1115,6 +1203,9 @@ class Pinn(torch.nn.Module):
         # Save the checkpoint dictionary
         torch.save(checkpoint, filepath)
 
+    def load_state_dict(self, state_dict, strict = True, assign = False):
+        return super().load_state_dict(state_dict, strict, assign)
+
     def get_extra_state(self) -> dict:
         return {
             "device": self.device,
@@ -1212,51 +1303,69 @@ class Pinn(torch.nn.Module):
         # Move the model into the checkpoint device
         #model.to(checkpoint["device"])
 
-    @staticmethod
-    def load(filepath: str) -> Self:
-        if not os.path.exists(filepath):
-            raise ValueError(f"File '{filepath}' not found.")
-
-        checkpoint = torch.load(filepath, weights_only=False)
-
-        model = Pinn(
-            device=checkpoint["device"],
-            spatial_input=checkpoint["spatial_input"],
-            temporal_input=checkpoint["temporal_input"],
-            param_input=checkpoint["param_input"],
-            hidden_units=checkpoint["hidden_units"],
-            activation_str=checkpoint["activation_str"]
-        ).to(checkpoint["device"])
-
-        model.load_state_dict(checkpoint["model_state_dict"])
-
-        if checkpoint["ff_encoding"]:
-            model.set_ff(model.B)
-        if checkpoint["dwa_mode"] != "Off":
-            model.set_dwa(
-                dwa_mode=checkpoint["dwa_mode"],
-                dwa_alpha=checkpoint["dwa_alpha"],
-                dwa_moving_avg_frequency=checkpoint["dwa_moving_avg_frequency"],
-                dwa_warm_up=checkpoint["dwa_warm_up"]
-            )
-        if checkpoint["ewc"]:
-            model.set_ewc(
-                ewc_frictioning_weights=checkpoint["ewc_frictioning_weights"],
-                ewc_fisher_diag=checkpoint["ewc_fisher_diag"],
-                ewc_weight=checkpoint["ewc_weight"],
-                ewc_auto_weighting=checkpoint["ewc_auto_weighting"],
-                ewc_warm_up=checkpoint["ewc_warm_up"],
-                ewc_decay=checkpoint["ewc_decay"]
-            )
+    #@staticmethod
+    #def load(filepath: str) -> Self:
+    #    if not os.path.exists(filepath):
+    #        raise ValueError(f"File '{filepath}' not found.")
+#
+    #    checkpoint = torch.load(filepath, weights_only=False)
+#
+    #    model = Pinn(
+    #        device=checkpoint["device"],
+    #        spatial_input=checkpoint["spatial_input"],
+    #        temporal_input=checkpoint["temporal_input"],
+    #        param_input=checkpoint["param_input"],
+    #        hidden_units=checkpoint["hidden_units"],
+    #        activation_str=checkpoint["activation_str"]
+    #    ).to(checkpoint["device"])
+#
+    #    model.load_state_dict(checkpoint["model_state_dict"])
+#
+    #    if checkpoint["ff_encoding"]:
+    #        model.set_ff(model.B)
+    #    if checkpoint["dwa_mode"] != "Off":
+    #        model.set_dwa(
+    #            dwa_mode=checkpoint["dwa_mode"],
+    #            dwa_alpha=checkpoint["dwa_alpha"],
+    #            dwa_moving_avg_frequency=checkpoint["dwa_moving_avg_frequency"],
+    #            dwa_warm_up=checkpoint["dwa_warm_up"]
+    #        )
+    #    if checkpoint["ewc"]:
+    #        model.set_ewc(
+    #            ewc_frictioning_weights=checkpoint["ewc_frictioning_weights"],
+    #            ewc_fisher_diag=checkpoint["ewc_fisher_diag"],
+    #            ewc_weight=checkpoint["ewc_weight"],
+    #            ewc_auto_weighting=checkpoint["ewc_auto_weighting"],
+    #            ewc_warm_up=checkpoint["ewc_warm_up"],
+    #            ewc_decay=checkpoint["ewc_decay"]
+    #        )
 
 class Evaluator:
     """
+    Callable objects applying task-specific loss functions to a spatio-temporal input, given the model, the task, (optionally) the system parameters and (optionally) the labels.
     """
 
     def __init__(self):
         pass
 
-    def __call__(self, model: Pinn, task: PhysicsTask, **kwargs) -> List[torch.Tensor]:
+    def __call__(self, model: Pinn, task: PhysicsTask, **kwargs) -> torch.Tensor:
+        """
+        Compute the task-specific loss of the model on the **kwargs arguments.
+
+        Parameters
+        ----------
+        model : Pinn
+            The model for which the loss is compiuted.
+        task : PhysicsTask
+            The task whose loss is computed.
+        **kwargs
+            Loss inputs.
+
+        Returns
+        -------
+        *torch.Tensor*
+            The batch of loss function values.
+        """
         if type(task) is AdvectionReactionDiffusionTask:
             return self._advection_reaction_diffusion_loss(model=model, task=task, **kwargs)
         elif type(task) is StationaryAllenCahnTask:

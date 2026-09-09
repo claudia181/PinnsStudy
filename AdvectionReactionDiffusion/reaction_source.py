@@ -354,10 +354,21 @@ class Source:
                 "A": self.A
             }
 
-def null_source() -> Source:
-    return Source(
-        mode="constant",
-        center=(0.0, 0.0),
-        amp=0.0,
-        sigma=1.0
-    )
+    def __str__(self) -> str:
+        string = f"- {self.mode} source:\n"
+        for key, value in self.mode_view().items():
+            if key != "mode":
+                string += f"-- {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    @classmethod
+    def null_source(cls) -> Self:
+        return Source(
+            mode="constant",
+            center=(0.0, 0.0),
+            amp=0.0,
+            sigma=1.0
+        )

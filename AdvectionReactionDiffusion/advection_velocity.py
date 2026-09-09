@@ -314,6 +314,15 @@ class Velocity:
         
         return state_view
 
+    def __str__(self) -> str:
+        string = "- Velocity:\n"
+        for key, value in self.mode_view().items():
+            string += f"-- {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
     @classmethod
     def null_velocity(cls) -> Self:
         """
