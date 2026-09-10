@@ -51,6 +51,8 @@ Static methods:
 import torch
 from torch.utils.data import Dataset
 from typing import List, Callable, Tuple, Self, Dict
+from AdvectionReactionDiffusion.advection_velocity import Velocity
+from AdvectionReactionDiffusion.reaction_source import Source
 
 # ===================================== PhySysDataset class =====================================
 class PhySysDataset(Dataset):
@@ -313,9 +315,9 @@ class PhySysDataset(Dataset):
             total_bytes += col.element_size() * col.numel()
         return total_bytes / (1024 ** 3)
 
-    # ------------ Static methods ------------
-    @staticmethod
-    def load(src_file: str) -> Self:
+    # ------------ Class methods ------------
+    @classmethod
+    def load(cls, src_file: str) -> Self:
         """
         Load the _PhySysDataset_ saved in `src_file`.
 
@@ -330,6 +332,81 @@ class PhySysDataset(Dataset):
         """
         d = torch.load(src_file, weights_only=False)
         dataset = PhySysDataset(cols=d["cols"])
+        for key in d["subkeys"]:
+            dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
+        return dataset
+
+class AdvectionReactionDiffusionDataset(PhySysDataset):
+    def __init__(
+            self,
+            cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor],
+            velocity: Velocity = None,
+            explicit_source: Source = None,
+            implicit_source: Source = None
+    ):
+        super().__init__(cols=cols)
+        if velocity is None:
+            velocity = Velocity.null_velocity()
+        if explicit_source is None:
+            explicit_source = Source.null_source()
+        if implicit_source is None:
+            implicit_source = Source.null_source()
+
+        self.velocity = velocity
+        self.explicit_source = explicit_source
+        self.implicit_source = implicit_source
+
+    def save(self, dst_file: str) -> None:
+        """
+        Save the dataset in `dst_file` as a dictionary
+        {"cols": self.cols, "subkeys": self.subkeys}.
+
+        Parameters
+        ----------
+        dst_file : str
+            Filepath where to save the dataset.
+
+        Returns
+        -------
+        _None_
+        """
+        d = {
+            "cols": self.cols,
+            "subkeys": self.subkeys,
+            "velocity": self.velocity.state_dict(),
+            "explicit_source": self.explicit_source.state_dict(),
+            "implicit_source": self.implicit_source.state_dict()
+        }
+        torch.save(d, dst_file)
+
+    # ------------ Class methods ------------
+    @classmethod
+    def load(cls, src_file: str) -> Self:
+        """
+        Load the _PhySysDataset_ saved in `src_file`.
+
+        Parameters
+        ----------
+        src_file : str
+            Filepath of the dataset to load.
+
+        Returns
+        -------
+        _PhySysDataset_
+        """
+        d = torch.load(src_file, weights_only=False)
+        velocity = Velocity.null_velocity()
+        velocity.load_state(d["velocity"])
+        explicit_source = Source.null_source()
+        explicit_source.load_state(d["explicit_source"])
+        implicit_source = Source.null_source()
+        implicit_source.load_state(d["implicit_source"])
+        dataset = AdvectionReactionDiffusionDataset(
+            cols=d["cols"],
+            velocity=velocity,
+            explicit_source=explicit_source,
+            implicit_source=implicit_source
+        )
         for key in d["subkeys"]:
             dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
         return dataset

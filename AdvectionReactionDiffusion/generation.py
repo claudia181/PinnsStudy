@@ -6,16 +6,13 @@ This module implements data generation for advection-reaction-diffusion systems.
 """
 
 import torch
-from torch.utils.data import ConcatDataset
-from phy_sys_dataset import PhySysDataset
+from phy_sys_dataset import AdvectionReactionDiffusionDataset
 from typing import Set
 from AdvectionReactionDiffusion.advection_reaction_diffusion import AdvectionReactionDiffusion
 from AdvectionReactionDiffusion.advection_velocity import Velocity
 from AdvectionReactionDiffusion.reaction_source import Source
 from AdvectionReactionDiffusion.boundary_condition import BoundaryCondition
 from AdvectionReactionDiffusion.initial_condition import InitialCondition
-
-from phy_sys_dataset import PhySysDataset
 from data_utils import get_uniform, get_grid
 from typing import Tuple, List
 
@@ -67,7 +64,7 @@ def generate_AdvectionReactionDiffusion(
         vmax: float = None,
         cmap: str = "inferno",
         figsize: tuple = (3.5, 3.5)
-) -> Tuple[PhySysDataset, PhySysDataset]:
+) -> Tuple[AdvectionReactionDiffusionDataset, AdvectionReactionDiffusionDataset]:
 
     if velocity is None:
         velocity = Velocity.null_velocity()
@@ -113,8 +110,8 @@ def generate_AdvectionReactionDiffusion(
                 if shape == "rectangle":
                     du = pde.trajectory.df[i]
                     d2u = pde.trajectory.d2f[i]
-                velocity = pde.trajectory.velocity[i]
-                source = pde.trajectory.source[i]
+                velocity_values = pde.trajectory.velocity[i]
+                source_values = pde.trajectory.source[i]
             else:
                 x = pde.trajectory.x_full
                 y = pde.trajectory.y_full
@@ -122,8 +119,8 @@ def generate_AdvectionReactionDiffusion(
                 if shape == "rectangle":
                     du = pde.trajectory.df_full[i]
                     d2u = pde.trajectory.d2f_full[i]
-                velocity = pde.trajectory.velocity_full[i]
-                source = pde.trajectory.source_full[i]
+                velocity_values = pde.trajectory.velocity_full[i]
+                source_values = pde.trajectory.source_full[i]
 
             t = torch.Tensor(time.repeat(len(x)))
             spacetime = torch.stack([x, y, t], dim=1)
@@ -135,14 +132,14 @@ def generate_AdvectionReactionDiffusion(
                 params.append(diff_coeff)
                 param_keys.append("D")
             if include_velocity_values:
-                vx = velocity[:, 0]
+                vx = velocity_values[:, 0]
                 params.append(vx)
                 param_keys.append("vx")
-                vy = velocity[:, 1]
+                vy = velocity_values[:, 1]
                 params.append(vy)
                 param_keys.append("vy")
             if include_source_values:
-                params.append(source)
+                params.append(source_values)
                 param_keys.append("s")
             if include_implicit_source_A:
                 if implicit_source.A is None:
@@ -171,68 +168,109 @@ def generate_AdvectionReactionDiffusion(
 
             if params != [] and bcs is not None:
                 if shape == "rectangle":
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("du", du),
-                        ("d2u", d2u),
-                        ("param", params),
-                        ("bc", bcs)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("du", du),
+                            ("d2u", d2u),
+                            ("param", params),
+                            ("bc", bcs)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
+
                     frame_ds.set_subkeys("bc", ["left", "top", "right", "bottom"])
                 else:
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("param", params),
-                        ("bc", bcs)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("param", params),
+                            ("bc", bcs)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
                 frame_ds.set_subkeys("param", param_keys)
             elif params != []:
                 if shape == "rectangle":
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("du", du),
-                        ("d2u", d2u),
-                        ("param", params)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("du", du),
+                            ("d2u", d2u),
+                            ("param", params)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
                 else:
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("param", params)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("param", params)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
                 frame_ds.set_subkeys("param", param_keys)
             elif bcs is not None:
                 if shape == "rectangle":
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("du", du),
-                        ("d2u", d2u),
-                        ("bc", bcs)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("du", du),
+                            ("d2u", d2u),
+                            ("bc", bcs)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
                     frame_ds.set_subkeys("bc", ["left", "top", "right", "bottom"])
                 else:
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("bc", bcs)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("bc", bcs)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
             else:
                 if shape == "rectangle":
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u),
-                        ("du", du),
-                        ("d2u", d2u)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u),
+                            ("du", du),
+                            ("d2u", d2u)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
                 else:
-                    frame_ds = PhySysDataset([
-                        ("spacetime", spacetime),
-                        ("u", u)
-                    ])
+                    frame_ds = AdvectionReactionDiffusionDataset(
+                        cols=[
+                            ("spacetime", spacetime),
+                            ("u", u)
+                        ],
+                        velocity=velocity,
+                        explicit_source=source,
+                        implicit_source=implicit_source
+                    )
             frame_ds.set_subkeys("spacetime", ["x", "y", "t"])
 
             if seq == "trajectory":
@@ -270,7 +308,7 @@ def generate_AdvectionReactionDiffusion_unlabeled(
 
         dx: float = None, dt: float = None,
         seed: int = 42
-) -> PhySysDataset:
+) -> AdvectionReactionDiffusionDataset:
     X = sample_points(n_samples=n_samples, mode=mode, ranges=[x_range, y_range, t_range], steps=[dx, dx, dt], seed=seed)
     x = X[:, 0]
     y = X[:, 1]
@@ -321,30 +359,50 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         params = torch.stack(params, dim=1)
         
     if params != [] and include_bc:
-        dataset = PhySysDataset([
-            ("spacetime", X), 
-            ("param", params), 
-            ("bc", bcs)
-        ])
+        dataset = AdvectionReactionDiffusionDataset(
+            cols=[
+                ("spacetime", X), 
+                ("param", params), 
+                ("bc", bcs)
+            ],
+            velocity=velocity,
+            explicit_source=source,
+            implicit_source=implicit_source
+        )
         dataset.set_subkeys("param", param_keys)
         if shape == "rectangle":
             dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
     elif params != []:
-        dataset = PhySysDataset([
-            ("spacetime", X), 
-            ("param", params)
-        ])
+        dataset = AdvectionReactionDiffusionDataset(
+            cols=[
+                ("spacetime", X), 
+                ("param", params)
+            ],
+            velocity=velocity,
+            explicit_source=source,
+            implicit_source=implicit_source
+        )
         dataset.set_subkeys("param", param_keys)
     elif include_bc:
-        dataset = PhySysDataset([
-            ("spacetime", X),
-            ("bc", bcs)
-        ])
+        dataset = AdvectionReactionDiffusionDataset(
+            cols=[
+                ("spacetime", X),
+                ("bc", bcs)
+            ],
+            velocity=velocity,
+            explicit_source=source,
+            implicit_source=implicit_source
+        )
         if shape == "rectangle":
             dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
     else:
-        dataset = PhySysDataset([
-            ("spacetime", X)
-        ])
+        dataset = AdvectionReactionDiffusionDataset(
+            cols=[
+                ("spacetime", X)
+            ],
+            velocity=velocity,
+            explicit_source=source,
+            implicit_source=implicit_source
+        )
     dataset.set_subkeys("spacetime", ["x", "y", "t"])
     return dataset

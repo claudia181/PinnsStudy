@@ -26,6 +26,7 @@ import torch
 from typing import List, Self
 from AdvectionReactionDiffusion.advection_velocity import Velocity
 from AdvectionReactionDiffusion.reaction_source import Source
+from typing import Callable
 
 # ===================================== PhysicsTask =====================================
 class PhysicsTask:
@@ -33,7 +34,8 @@ class PhysicsTask:
     def __init__(
             self,
             task_id: str = None,
-            weight: float = None
+            weight: float = None,
+            loss_fn: Callable = None
     ):
         """
         Constructor.
@@ -47,6 +49,7 @@ class PhysicsTask:
         """
         self.id = task_id
         self.weight = weight
+        self.loss_fn = loss_fn
         self.grad_norm = None
         self.grad = None
         self.conflict = None

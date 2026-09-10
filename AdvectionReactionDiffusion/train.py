@@ -24,7 +24,16 @@ import shutil
 from model import Pinn
 from data_utils import get_boundary, get_interior, get_iterators
 from load_store_utils import resume_model, save_model
-from physics_task import PhysicsTask, AdvectionReactionDiffusionTask, NeumannBCTask, DirichletBCTask, ICTask
+
+from physics_task import PhysicsTask, \
+    AdvectionReactionDiffusionTask, StationaryAllenCahnTask, \
+    NeumannBCTask, DirichletBCTask, \
+    ICTask, \
+    OutputTask, \
+    DerivativeTask, SpatialDerivativeTask, TemporalDerivativeTask, \
+    Derivative2Task, SpatialDerivative2Task, TemporalDerivative2Task
+from loss_functions import attach_loss_function
+
 from phy_sys_dataset import PhySysDataset
 
 from typing import List
@@ -33,57 +42,57 @@ import time
 def train(
         model: Pinn,
 
-        ff: bool,
-        dwa: bool,
-        ewc: bool,
+        ff: bool, # sets the model to use Fourier feature encoding
+        dwa: bool, # sets the model to use dynamic weight adaptation to weight the multi-task loss
+        ewc: bool, # sets the model to use EWC regularization for forgetting mitigation
 
-        new_tasks: List[PhysicsTask],
-        new_datas: List[PhySysDataset],
-        new_weights: List[float] | List[List[float]],
+        new_tasks: List[PhysicsTask], # tasks on which the model has to be trained
+        new_datas: List[PhySysDataset], # datas for the training on the new tasks
+        new_weights: List[float] | List[List[float]], # initial weights of the new tasks in the multi-objective loss
 
-        recall_tasks: List[PhysicsTask],
-        recall_datas: List[PhySysDataset],
-        recall_weights: List[float] | List[List[float]],
+        recall_tasks: List[PhysicsTask], # tasks on which the model has to be recalled during training
+        recall_datas: List[PhySysDataset], # datas for the recalling of the recall tasks
+        recall_weights: List[float] | List[List[float]], # initial weights of the recall tasks in the multi-objective loss
 
-        val_datas: List[PhySysDataset],
+        val_datas: List[PhySysDataset], # datas for the validation on the new tasks
 
-        monitoring_tasks: List[PhysicsTask],
-        monitoring_datas: List[PhySysDataset],
+        monitoring_tasks: List[PhysicsTask], # tasks on which the model is monitored during training (only for an a-posteriori analysis)
+        monitoring_datas: List[PhySysDataset], # datas for the monitoring of the monitoring tasks
 
-        monitor_conflicts: bool,
-        monitor_weights: bool,
-        monitor_grad_norms: bool,
-        eval_every: int,
+        monitor_conflicts: bool, # sets the model to collect some conflicts during training
+        monitor_weights: bool, # sets the model to trace the balancing weights of the multi-task loss
+        monitor_grad_norms: bool, # sets the model to trace gradient norm during training
+        eval_every: int, # period defining evaluation periodicity TODO: eval=monitor or val?
 
-        clip_grad: bool,
-        batch_size: int | List[int],
-        learning_rate: float | List[float],
-        epochs: int,
-        steps: int,
-        destination_folder: str,
+        clip_grad: bool, # if true, the gradient is clipped (sometimes needed for stability)
+        batch_size: int | List[int], # batch size for training
+        learning_rate: float | List[float], # statring learning rate
+        epochs: int, # total number of training epochs
+        steps: int, # total number of training steps
+        destination_folder: str, # directory in which the training products are stored
 
-        n_trials: int = 1,
-        seed: int = 42,
-        device: str = "cpu",
+        n_trials: int = 1, # number of trials for the model selection
+        seed: int = 42, # seed for random generations
+        device: str = "cpu", # device
 
-        ff_size: int | List[int] = None,
-        ff_frequency_var: float | List[float] = None,
+        ff_size: int | List[int] = None, # number of Fourier features for the eventual Fourier encoding
+        ff_frequency_var: float | List[float] = None, # frequency variance for the sampling of frequencies for Fourier encoding
 
-        dwa_mode: str = "Off",
-        dwa_alpha: float | List[float] = 0.9,
-        dwa_warm_up: int = 3,
-        dwa_moving_avg_frequency: int = 1,
+        dwa_mode: str = "Off", # eventual DWA method (off -> fixed weights)
+        dwa_alpha: float | List[float] = 0.9, # moving avg factor for the running avg of the weights of the multi-task loss
+        dwa_warm_up: int = 3, # number of warm up epochs to wait before starting DWA
+        dwa_moving_avg_frequency: int = 1, # update frequency of the multi-task loss weights with DWA
 
-        fisher_diag_avg: torch.Tensor = None,
-        fisher_diag_new: torch.Tensor = None,
-        ewc_weight: float | List[float] = 0.0,
-        ewc_auto_weighting: bool = False,
-        ewc_warm_up: int | List[int] = 1,
-        ewc_decay_factor: float | List[float] = 1.0,
-        ewc_moving_avg_factor: float | List[float] = 1.0,
-        ewc_objective_weights: torch.Tensor = None,
+        fisher_diag_avg: torch.Tensor = None, # current FIM (average over past CL tasks)
+        fisher_diag_new: torch.Tensor = None, # new FIM relative to the current CL task
+        ewc_weight: float | List[float] = 0.0, # weight in the loss function of the EWC regularization term
+        ewc_auto_weighting: bool = False, # if True, the weight of the EWC term is authomatically set
+        ewc_warm_up: int | List[int] = 1, # epochs to wait before applying EWC
+        ewc_decay_factor: float | List[float] = 1.0, # decay factor for EWC weight in the multi-task loss
+        ewc_moving_avg_factor: float | List[float] = 1.0, # moving avg factor for the running avg of the FIM (running over CL tasks)
+        ewc_objective_weights: torch.Tensor = None, # weights of the frinctioning model
 
-        conflict_reference_task_idx: int = 0
+        conflict_reference_task_idx: int = 0 # index of the task wrt which gradient conflicts are computed
 ) -> None:
     # Set the model never model-selected (fixed) attributes
     model.set_conflict_monitoring(
@@ -540,7 +549,9 @@ def train_full():
     if args.epochs == -1:
         raise ValueError(f"Specify the number of epochs.")
     
-    train_trajectory = PhySysDataset.load(args.train_data).datasets
+    train_dataset = PhySysDataset.load(args.train_data)
+    train_trajectory = train_dataset.datasets
+    param_keys = train_dataset.subkeys["param"]
     train_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
     train_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
 
@@ -554,6 +565,10 @@ def train_full():
         return torch.zeros_like(t)
 
     train_tasks = [
+        AdvectionReactionDiffusionTask(
+            param_keys = param_keys,
+            velocity
+        )
         AdvectionReactionDiffusionTask(
             parameters=fixed_params,
             velocity=v
