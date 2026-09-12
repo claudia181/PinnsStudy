@@ -29,6 +29,7 @@ def sample_points(mode: str, n_samples: int, ranges: List[Tuple[float]], steps: 
         raise ValueError(f"Invalid mode '{mode}'. It must be in ['uniform', 'grid']")
 
 def generate_AdvectionReactionDiffusion(
+        dataset_name: str,
         shape: str,
         spatial_region: dict,
         #bc: dict,
@@ -169,6 +170,7 @@ def generate_AdvectionReactionDiffusion(
             if params != [] and bcs is not None:
                 if shape == "rectangle":
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u),
@@ -177,6 +179,9 @@ def generate_AdvectionReactionDiffusion(
                             ("param", params),
                             ("bc", bcs)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
@@ -185,12 +190,16 @@ def generate_AdvectionReactionDiffusion(
                     frame_ds.set_subkeys("bc", ["left", "top", "right", "bottom"])
                 else:
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u),
                             ("param", params),
                             ("bc", bcs)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
@@ -199,6 +208,7 @@ def generate_AdvectionReactionDiffusion(
             elif params != []:
                 if shape == "rectangle":
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u),
@@ -206,17 +216,24 @@ def generate_AdvectionReactionDiffusion(
                             ("d2u", d2u),
                             ("param", params)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
                     )
                 else:
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u),
                             ("param", params)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
@@ -225,6 +242,7 @@ def generate_AdvectionReactionDiffusion(
             elif bcs is not None:
                 if shape == "rectangle":
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u),
@@ -232,6 +250,9 @@ def generate_AdvectionReactionDiffusion(
                             ("d2u", d2u),
                             ("bc", bcs)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
@@ -239,11 +260,15 @@ def generate_AdvectionReactionDiffusion(
                     frame_ds.set_subkeys("bc", ["left", "top", "right", "bottom"])
                 else:
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u),
                             ("bc", bcs)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
@@ -257,16 +282,23 @@ def generate_AdvectionReactionDiffusion(
                             ("du", du),
                             ("d2u", d2u)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
                     )
                 else:
                     frame_ds = AdvectionReactionDiffusionDataset(
+                        name=dataset_name,
                         cols=[
                             ("spacetime", spacetime),
                             ("u", u)
                         ],
+                        bc=bc,
+                        ic=ic,
+                        diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
                         implicit_source=implicit_source
@@ -287,6 +319,7 @@ def generate_AdvectionReactionDiffusion(
     return trajectory_ds, snapshots_ds
 
 def generate_AdvectionReactionDiffusion_unlabeled(
+        dataset_name: str,
         n_samples: int,
         mode: str,
         x_range: Tuple[float],
@@ -300,6 +333,7 @@ def generate_AdvectionReactionDiffusion_unlabeled(
 
         shape: str = None,
         bc: BoundaryCondition = None,
+        ic: InitialCondition = None,
 
         include_implicit_source_A: bool = False,
         include_implicit_source_B: bool = False,
@@ -360,11 +394,15 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         
     if params != [] and include_bc:
         dataset = AdvectionReactionDiffusionDataset(
+            name=dataset_name,
             cols=[
                 ("spacetime", X), 
                 ("param", params), 
                 ("bc", bcs)
             ],
+            bc=bc,
+            ic=ic,
+            diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
             implicit_source=implicit_source
@@ -374,10 +412,14 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
     elif params != []:
         dataset = AdvectionReactionDiffusionDataset(
+            name=dataset_name,
             cols=[
                 ("spacetime", X), 
                 ("param", params)
             ],
+            bc=bc,
+            ic=ic,
+            diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
             implicit_source=implicit_source
@@ -385,10 +427,14 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         dataset.set_subkeys("param", param_keys)
     elif include_bc:
         dataset = AdvectionReactionDiffusionDataset(
+            name=dataset_name,
             cols=[
                 ("spacetime", X),
                 ("bc", bcs)
             ],
+            bc=bc,
+            ic=ic,
+            diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
             implicit_source=implicit_source
@@ -397,9 +443,13 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             dataset.set_subkeys("bc", ["left", "top", "right", "bottom"])
     else:
         dataset = AdvectionReactionDiffusionDataset(
+            name=dataset_name,
             cols=[
                 ("spacetime", X)
             ],
+            bc=bc,
+            ic=ic,
+            diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
             implicit_source=implicit_source

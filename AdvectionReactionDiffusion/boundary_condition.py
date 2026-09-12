@@ -56,6 +56,15 @@ class BoundaryCondition:
         self._check(state["shape"])
         self.top = state["shape"]
 
+    def __str__(self) -> str:
+        string = f"- Boundary Conditions:\n"
+        for key, value in self.state_dict().items():
+            string += f"-- {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
 # ===================================== RectangularBoundary class =====================================
 class RectangularBoundaryCondition(BoundaryCondition):
     """
@@ -113,7 +122,6 @@ class RectangularBoundaryCondition(BoundaryCondition):
             elif mode == "Dirichlet":
                 rho.constrain(value, mesh_faces)
 
-
     def state_dict(self) -> dict:
         """
         Returns the state dictionary of the object.
@@ -140,6 +148,15 @@ class RectangularBoundaryCondition(BoundaryCondition):
         self.bottom = state["bottom"]
         self.left = state["left"]
         self.right = state["right"]
+
+    def __str__(self) -> str:
+        string = f"- Boundary Conditions:\n"
+        for key, value in self.state_dict().items():
+            string += f"-- {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()
 
 # ===================================== CircularBoundary class =====================================
 class CircularBoundaryCondition(BoundaryCondition):
@@ -192,3 +209,12 @@ class CircularBoundaryCondition(BoundaryCondition):
         super().load_state()
         self._check(state["circumference"])
         self.circumference = state["circumference"]
+
+    def __str__(self) -> str:
+        string = f"- Boundary Conditions:\n"
+        for key, value in self.state_dict().items():
+            string += f"-- {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()

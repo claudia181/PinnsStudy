@@ -25,6 +25,9 @@ from model import Pinn
 from data_utils import get_boundary, get_interior, get_iterators
 from load_store_utils import resume_model, save_model
 
+from advection_velocity import Velocity
+from reaction_source import Source
+
 from physics_task import PhysicsTask, \
     AdvectionReactionDiffusionTask, StationaryAllenCahnTask, \
     NeumannBCTask, DirichletBCTask, \
@@ -34,7 +37,7 @@ from physics_task import PhysicsTask, \
     Derivative2Task, SpatialDerivative2Task, TemporalDerivative2Task
 from loss_functions import attach_loss_function
 
-from phy_sys_dataset import PhySysDataset
+from phy_sys_dataset import PhySysDataset, AdvectionReactionDiffusionDataset
 
 from typing import List
 import time
@@ -549,9 +552,15 @@ def train_full():
     if args.epochs == -1:
         raise ValueError(f"Specify the number of epochs.")
     
-    train_dataset = PhySysDataset.load(args.train_data)
+    train_dataset = AdvectionReactionDiffusionDataset.load(args.train_data)
     train_trajectory = train_dataset.datasets
+
     param_keys = train_dataset.subkeys["param"]
+    diffusion_coefficient = train_dataset.diffusion_coefficient
+    velocity = train_dataset.velocity
+    explicit_source = train_dataset.explicit_source
+    implicit_source = train_dataset.implicit_source
+
     train_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
     train_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
 
@@ -559,10 +568,18 @@ def train_full():
     val_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in val_trajectory]
     val_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in val_trajectory]
 
-    fixed_params = {}
+    ge_task =  AdvectionReactionDiffusionTask(
+        param_keys=param_keys,
+        velocity=velocity,
+        source=explicit_source,
+        implicit_source=implicit_source,
+        D=diffusion_coefficient,
+        weight=1.0
+    )
 
-    def v(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        return torch.zeros_like(t)
+    bc_task = NeumannBCTask(
+        top_flux=train_dataset.
+    )
 
     train_tasks = [
         AdvectionReactionDiffusionTask(

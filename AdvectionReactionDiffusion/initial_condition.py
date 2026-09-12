@@ -35,6 +35,12 @@ class InitialField:
     def load_state(self, state: dict) -> None:
         self.id = state["id"]
 
+    def __str__(self) -> str:
+        return f"-- field: {self.id}\n"
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
 # ===================================== Constant field =====================================
 class ConstantField(InitialField):
     """
@@ -62,6 +68,17 @@ class ConstantField(InitialField):
     def load_state(self, state: dict) -> None:
         super().load_state(state)
         self.value = state["value"]
+
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
+
 
 # ===================================== Gaussian bump field =====================================
 class GaussianBumpField(InitialField):
@@ -104,6 +121,16 @@ class GaussianBumpField(InitialField):
         self.yc = state["yc"]
         self.sigma = state["sigma"]
 
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
+
 # ===================================== Concentric circles field =====================================
 class CirclesField(InitialField):
     """
@@ -144,6 +171,16 @@ class CirclesField(InitialField):
         self.Cy = state["Cy"]
         self.D = state["D"]
 
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
+
 # ===================================== Valleys field =====================================
 class ValleysField(InitialField):
     """
@@ -174,6 +211,16 @@ class ValleysField(InitialField):
         super().load_state(state)
         self.A = state["A"]
         self.B = state["B"]
+
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
 
 # ===================================== Stripes field =====================================
 class StripesField(InitialField):
@@ -208,6 +255,16 @@ class StripesField(InitialField):
         self.A = state["A"]
         self.Bx = state["Bx"]
         self.By = state["By"]
+
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
 
 # ===================================== Grid field =====================================
 class GridField(InitialField):
@@ -259,6 +316,16 @@ class GridField(InitialField):
         self.Cx = state["Cx"]
         self.Cy = state["Cy"]
 
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
+
 # ===================================== Uniform noise field =====================================
 class UniformNoiseField(InitialField):
     """
@@ -275,7 +342,7 @@ class UniformNoiseField(InitialField):
     max_noise : float
     """
     def __init__(self, min_noise: float, max_noise: float) -> None:
-        super().__init__(id="periodic_valleys")
+        super().__init__(id="uniform_noise")
         self.min_noise = min_noise
         self.max_noise = max_noise
 
@@ -292,6 +359,16 @@ class UniformNoiseField(InitialField):
         super().load_state(state)
         self.min_noise = state["min_noise"]
         self.max_noise = state["max_noise"]
+
+    def __str__(self) -> str:
+        string = super().__str__()
+        for key, value in self.state_dict().items():
+            if key != "id":
+                string += f"\t {key}: {value}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return super().__str__()
 
 # ===================================== Initial condition =====================================
 class InitialCondition:
@@ -326,3 +403,12 @@ class InitialCondition:
     def load_state(self, state: dict) -> None:
         for field in self.scalar_fields:
             field.load_state(state[field.id])
+
+    def __str__(self) -> str:
+        string = "- Initial conditions:\n"
+        for field in self.scalar_fields:
+            string += field.__str__()
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()

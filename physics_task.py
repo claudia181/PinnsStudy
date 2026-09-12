@@ -67,6 +67,7 @@ class PhysicsTask:
         """
         task = PhysicsTask()
         task.load_state(self.state_dict())
+        return task
 
     def state_dict(self) -> dict:
         """

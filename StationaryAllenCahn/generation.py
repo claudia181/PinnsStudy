@@ -26,6 +26,7 @@ def sample_points(mode: str, n_samples: int, ranges: List[Tuple[float]], steps: 
 
 
 def generate_AllenCahn(
+        dataset_name: str,
         n_samples: int,
         mode: str,
         x_range: Tuple[float],
@@ -59,25 +60,36 @@ def generate_AllenCahn(
     if params != []:
         params = torch.tensor(params).repeat(len(X), 1)
 
-        dataset = PhySysDataset(cols=[
-            ("spacetime", X),
-            ("u", pde.u),
-            ("du", pde.du),
-            ("d2u", pde.d2u),
-            ("param", params)
-        ])
+        dataset = PhySysDataset(
+            name=dataset_name,
+            cols=[
+                ("spacetime", X),
+                ("u", pde.u),
+                ("du", pde.du),
+                ("d2u", pde.d2u),
+                ("param", params)
+            ],
+            bc=None,
+            ic=None
+        )
         dataset.set_subkeys("param", param_keys)
     else:
-        dataset = PhySysDataset(cols=[
-            ("spacetime", X),
-            ("u", pde.u),
-            ("du", pde.du),
-            ("d2u", pde.d2u)
-        ])
+        dataset = PhySysDataset(
+            name=dataset_name,
+            cols=[
+                ("spacetime", X),
+                ("u", pde.u),
+                ("du", pde.du),
+                ("d2u", pde.d2u)
+            ],
+            bc=None,
+            ic=None
+        )
     dataset.set_subkeys("spacetime", ["x", "y"])
     return dataset
 
 def generate_AllenCahn_unlabeled(
+        dataset_name: str,
         n_samples: int,
         mode: str,
         x_range: Tuple[float],
@@ -106,13 +118,18 @@ def generate_AllenCahn_unlabeled(
                 params.append(item)
                 param_keys.append(f"xi{i}")
     if params == []:
-       dataset = PhySysDataset([("spacetime", X)])
+       dataset = PhySysDataset(name=dataset_name, cols=[("spacetime", X)], bc=None, ic=None)
     else:
         params = torch.tensor(params).repeat(len(X), 1)
-        dataset = PhySysDataset([
-            ("spacetime", X), 
-            ("param", params)
-        ])
+        dataset = PhySysDataset(
+            name=dataset_name,
+            cols=[
+                ("spacetime", X), 
+                ("param", params)
+            ],
+            bc=None,
+            ic=None
+        )
         dataset.set_subkeys("param", param_keys)
     dataset.set_subkeys("spacetime", ["x", "y"])
     return dataset

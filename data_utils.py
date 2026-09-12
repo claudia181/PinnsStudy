@@ -86,7 +86,7 @@ def filter_points(
     for key in dataset.cols.keys():
         cols[key] = dataset.cols[key][mask]
 
-    filtered_dataset = PhySysDataset(cols=cols)
+    filtered_dataset = PhySysDataset(name=dataset.name, cols=cols, bc=dataset.bc, ic=dataset.ic)
     filtered_dataset.subkeys = dataset.subkeys
     return filtered_dataset
 

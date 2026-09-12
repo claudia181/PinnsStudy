@@ -6,8 +6,9 @@ This module implements the dataset containing the informations relative to a phy
 (subcalssing the torch.utils.data.Dataset class).
 
 Class: PhySysDataset
-
-Attributes:
+---
+**Attributes:**
+    - name: the name of the dataset.
     - cols: a dictionary {(col_name: str, col_values: torch.Tensor)}, where each element represent 
             a column of the dataset and the column vaues are all tensors of the same length, 
             which is the number of rows (# data points);
@@ -19,7 +20,7 @@ Attributes:
                associated (ordered) list of subkeys. E.g. for the spatio-temporal coordinates
                col_key = "spacetime", subkeys = ["x", "y", "t"].
 
-'Public' methods:
+**Public methods:**
     - `columns`: None -> List[Tensor].
         It returns the list of column tensors.
     - `get_column`: str, Callable[Tensor, bool] -> Tensor.
@@ -40,12 +41,23 @@ Attributes:
         Deep copy method: Nothing shared.
     - `save`: str -> None
         It stores the dataset in the file identified by the path string.
-    - `size_gb`: List[str] -> float.
-        It returns the size in gigabytes of the dataset.
+    - `size_mb`: List[str] -> float.
+        It returns the size in megabytes of the dataset.
 
-Static methods:
-    - load: str -> PhySysDataset
+**Class methods:**
+    - load: str -> PhySysDataset.
         It load the dataset in the file identified by the string.
+
+Subclass: AdvectionReactionDiffusionDataset
+---
+**Additional attributes:**
+    - `velocity`: Velocity.
+        The velocity function of the advection process.
+    - `explicit_source`: Source.
+        The explicit source function of the reaction process.
+    - `implicit_source`: Source.
+        The implicit source function of the reaction process.
+
 """
 
 import torch
@@ -53,11 +65,20 @@ from torch.utils.data import Dataset
 from typing import List, Callable, Tuple, Self, Dict
 from AdvectionReactionDiffusion.advection_velocity import Velocity
 from AdvectionReactionDiffusion.reaction_source import Source
+from AdvectionReactionDiffusion.boundary_condition import BoundaryCondition, RectangularBoundaryCondition, CircularBoundaryCondition
+from AdvectionReactionDiffusion.initial_condition import InitialCondition
 
 # ===================================== PhySysDataset class =====================================
 class PhySysDataset(Dataset):
     # ------------ Subclassing methods ------------
-    def __init__(self, cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor]) -> None:
+    def __init__(
+            self,
+            name: str,
+            cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor],
+            bc: BoundaryCondition | List[BoundaryCondition],
+            ic: InitialCondition | List[InitialCondition]
+    ) -> None:
+        self.name = name
         self.cols = {}
         if type(cols) is list:
             if cols == []:
@@ -81,6 +102,8 @@ class PhySysDataset(Dataset):
                     raise ValueError(f"Length of column {key} is {len(col)}, but is expected to be {self.length}.")
             self.cols = cols
         self.subkeys = {}
+        self.bc = bc
+        self.ic = ic
 
     def __len__(self) -> int:
         return self.length
@@ -214,11 +237,16 @@ class PhySysDataset(Dataset):
         subsampled_cols = {}
         for key, col in self.cols.items():
             subsampled_cols[key] = col[indices]
-        subsampled_ds = PhySysDataset(subsampled_cols)
+        subsampled_ds = PhySysDataset(
+            name=self.name,
+            cols=subsampled_cols,
+            bc=self.bc,
+            ic=self.ic
+        )
         subsampled_ds.subkeys = self.subkeys.copy()
         return subsampled_ds
     
-    def merge(self, dataset: Self) -> None:
+    def merge(self, dataset: Self, merge_bc: bool = False, merge_ic: bool = False) -> None:
         """
         Merge the _PhySysDataset_ `dataset` the current one.
 
@@ -239,6 +267,28 @@ class PhySysDataset(Dataset):
             self.cols[key] = torch.cat((self.cols[key], col))
         self.length += dataset.length
 
+        if merge_bc:
+            if type(self.bc) is not list:
+                bc1 = [self.bc]
+            else:
+                bc1 = self.bc
+            if type(dataset.bc) is not list:
+                bc2 = [dataset.bc]
+            else:
+                bc2 = dataset.bc
+            self.bc = bc1 + bc2
+
+        if merge_ic:
+            if type(self.ic) is not list:
+                ic1 = [self.ic]
+            else:
+                ic1 = self.ic
+            if type(dataset.ic) is not list:
+                ic2 = [dataset.ic]
+            else:
+                ic2 = dataset.ic
+            self.ic = ic1 + ic2
+
     def get_keys(self) -> List[str]:
         return list(self.cols.keys())
     
@@ -254,7 +304,12 @@ class PhySysDataset(Dataset):
         -------
         _PhySysDataset_
         """
-        ds_copy = PhySysDataset(self.cols.copy())
+        ds_copy = PhySysDataset(
+            name=self.name, 
+            cols=self.cols.copy(),
+            bc=self.bc,
+            ic=self.ic
+        )
         ds_copy.subkeys = self.subkeys.copy()
         return ds_copy
     
@@ -271,9 +326,58 @@ class PhySysDataset(Dataset):
         _PhySysDataset_
         """
         new_cols = {key: col.clone() for key, col in self.cols.items()}
-        ds_copy = PhySysDataset(new_cols)
+        ds_copy = PhySysDataset(
+            name=self.name,
+            cols=new_cols,
+            bc=self.bc,
+            ic=self.ic
+        )
         ds_copy.subkeys = self.subkeys.copy()
         return ds_copy
+    
+    def state_dict(self) -> dict:
+        if type(self.bc) is list:
+            bcs = [bc.state_dict() for bc in self.bc]
+        else:
+            bcs = self.bc.state_dict()
+
+        if type(self.ic) is list:
+            ics = [ic.state_dict() for ic in self.ic]
+        else:
+            ics = self.ic.state_dict()
+            
+        return {
+            "name": self.name,
+            "cols": self.cols,
+            "subkeys": self.subkeys,
+            "bc": bcs,
+            "ic": ics
+        }
+    
+    def load_state(self, state: dict) -> None:
+        self.name = state["name"]
+        self.cols = state["cols"]
+        for key in state["subkeys"]:
+            self.set_subkeys(key=key, subkeys=state["subkeys"][key])
+
+        if type(state["bc"]) is not list:
+            state["bc"] = [state["bc"]]
+        self.bc = []
+        for bc_dict in state["bc"]:
+            if bc_dict["shape"] == "rectangle":
+                self.bc.append(RectangularBoundaryCondition().load_state(bc_dict))
+            else:
+                self.bc.append(CircularBoundaryCondition().load_state(bc_dict))
+        if len(self.bc) == 1:
+            self.bc = self.bc[0]
+
+        if type(state["ic"]) is not list:
+            state["ic"] = [state["ic"]]
+            self.ic = InitialCondition().load_state(state["ic"])
+        else:
+            self.ic = []
+            for ic_dict in state["ic"]:
+                self.ic.append(InitialCondition().load_state(ic_dict))
     
     def save(self, dst_file: str) -> None:
         """
@@ -289,19 +393,16 @@ class PhySysDataset(Dataset):
         -------
         _None_
         """
-        d = {
-            "cols": self.cols,
-            "subkeys": self.subkeys
-        }
+        d = self.state_dict()
         torch.save(d, dst_file)
 
-    def size_gb(self, col_ids: List[str] = None) -> float:
+    def size_mb(self, col_ids: List[str] = None) -> float:
         """
         Returns the size in Gb of the dataset.
 
         Parameters
         ----------
-        columns : List[str]
+        col_ids : List[str]
 
         Returns
         -------
@@ -313,8 +414,35 @@ class PhySysDataset(Dataset):
         for col_str in col_ids:
             col = self.cols[col_str]
             total_bytes += col.element_size() * col.numel()
-        return total_bytes / (1024 ** 3)
+        return total_bytes / (1024 ** 2)
 
+    def __str__(self) -> str:
+        string = f"{self.name}\n"
+        string += f"- size: {self.size_mb():.2f} MB\n"
+        string += f"- n_rows: {self.length}\n"
+        string += f"- n_columns: {len(self.cols.keys())}\n"
+        string += f"- columns: {self.cols.keys()}\n"
+        string += f"\n- subcolumns:\n"
+        for key, value in self.subkeys.items():
+            string += f"-- {key}: {value}\n"
+
+        if type(self.bc) is list:
+            for bc in self.bc:
+                string += f"\n{bc.__str__()}"
+        else:
+            string += f"\n{self.bc.__str__()}"
+
+        if type(self.ic) is list:
+            for ic in self.ic:
+                string += f"\n{ic.__str__()}"
+        else:
+            string += f"\n{self.ic.__str__()}"
+            
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()
+    
     # ------------ Class methods ------------
     @classmethod
     def load(cls, src_file: str) -> Self:
@@ -330,21 +458,35 @@ class PhySysDataset(Dataset):
         -------
         _PhySysDataset_
         """
-        d = torch.load(src_file, weights_only=False)
-        dataset = PhySysDataset(cols=d["cols"])
-        for key in d["subkeys"]:
-            dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
-        return dataset
+        state = torch.load(src_file, weights_only=False)
+
+        ds = PhySysDataset(name="", cols={}, bc=None, ic=None)
+
+        ds.load_state(state=state)
+
+        return ds
 
 class AdvectionReactionDiffusionDataset(PhySysDataset):
     def __init__(
             self,
+            name: str,
             cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor],
-            velocity: Velocity = None,
-            explicit_source: Source = None,
-            implicit_source: Source = None
+            bc: BoundaryCondition | List[BoundaryCondition],
+            ic: InitialCondition | List[InitialCondition],
+            diffusion_coefficient: float | List[float] = None,
+            velocity: Velocity | List[Velocity] = None,
+            explicit_source: Source | List[Source] = None,
+            implicit_source: Source | List[Source] = None
     ):
-        super().__init__(cols=cols)
+        super().__init__(
+            name=name, 
+            cols=cols,
+            bc=bc,
+            ic=ic
+        )
+
+        if diffusion_coefficient is None:
+            diffusion_coefficient = 0.0
         if velocity is None:
             velocity = Velocity.null_velocity()
         if explicit_source is None:
@@ -352,9 +494,240 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
         if implicit_source is None:
             implicit_source = Source.null_source()
 
+        self.diffusion_coefficient = diffusion_coefficient
         self.velocity = velocity
         self.explicit_source = explicit_source
         self.implicit_source = implicit_source
+
+    def subsample(self, indices: torch.Tensor) -> Self:
+        """
+        Returns a _AdvectionReactionDiffusionDataset_ with subsampled columns. 
+        The subsampled rows are the ones of indexes `indices`.
+
+        Parameters
+        ----------
+        indices : torch.Tensor
+            Indices of the points/rows to subsample.
+
+        Returns
+        -------
+        AdvectionReactionDiffusionDataset
+            Dataset with subsampled columns.
+        """
+        subsampled_cols = {}
+        for key, col in self.cols.items():
+            subsampled_cols[key] = col[indices]
+        subsampled_ds = AdvectionReactionDiffusionDataset(
+            name=self.name, 
+            cols=subsampled_cols, 
+            bc=self.bc,
+            ic=self.ic,
+            diffusion_coefficient=self.diffusion_coefficient,
+            velocity=self.velocity, 
+            explicit_source=self.explicit_source, 
+            implicit_source=self.implicit_source
+        )
+        subsampled_ds.subkeys = self.subkeys.copy()
+        return subsampled_ds
+        
+    def merge(
+            self, 
+            dataset: Self,
+            merge_bc: bool = False,
+            merge_ic: bool = False,
+            merge_diffusion_coefficient: bool = False,
+            merge_velocity: bool = False,
+            merge_explicit_source: bool = False,
+            merge_implicit_source: bool = False
+    ) -> None:
+        """
+        Merge the _AdvectionReactionDiffusionDataset_ `dataset` the current one.
+
+        Parameters
+        ----------
+        dataset : AdvectionReactionDiffusionDataset
+            Dataset to merge with the current one.
+
+        Returns
+        -------
+        _None_
+        """
+        if len(dataset.cols.keys()) != len(self.cols.keys()):
+            raise ValueError(f"Different columns to merge: {self.cols.keys()} != {dataset.cols.keys()}.")
+        for key, col in dataset.cols.items():
+            if key not in self.cols.keys():
+                raise ValueError(f"Column {key} not in {self.cols.keys()}.")
+            self.cols[key] = torch.cat((self.cols[key], col))
+        self.length += dataset.length
+
+        if merge_bc:
+            if type(self.bc) is not list:
+                bc1 = [self.bc]
+            else:
+                bc1 = self.bc
+            if type(dataset.bc) is not list:
+                bc2 = [dataset.bc]
+            else:
+                bc2 = dataset.bc
+            self.bc = bc1 + bc2
+
+        if merge_ic:
+            if type(self.ic) is not list:
+                ic1 = [self.ic]
+            else:
+                ic1 = self.ic
+            if type(dataset.ic) is not list:
+                ic2 = [dataset.ic]
+            else:
+                ic2 = dataset.ic
+            self.ic = ic1 + ic2
+
+        if merge_diffusion_coefficient:
+            if type(self.diffusion_coefficient) is not list:
+                diffusion_coefficient1 = [self.diffusion_coefficient]
+            else:
+                diffusion_coefficient1 = self.diffusion_coefficient
+            if type(dataset.diffusion_coefficient) is not list:
+                diffusion_coefficient2 = [dataset.diffusion_coefficient]
+            else:
+                diffusion_coefficient2 = dataset.diffusion_coefficient
+            self.diffusion_coefficient = diffusion_coefficient1 + diffusion_coefficient2
+
+        if merge_velocity:
+            if type(self.velocity) is not list:
+                velocity1 = [self.velocity]
+            else:
+                velocity1 = self.velocity
+            if type(dataset.velocity) is not list:
+                velocity2 = [dataset.velocity]
+            else:
+                velocity2 = dataset.velocity
+            self.velocity = velocity1 + velocity2
+
+        if merge_explicit_source:
+            if type(self.explicit_source) is not list:
+                explicit_source1 = [self.explicit_source]
+            else:
+                explicit_source1 = self.explicit_source
+            if type(dataset.explicit_source) is not list:
+                explicit_source2 = [dataset.explicit_source]
+            else:
+                explicit_source2 = dataset.explicit_source
+            self.explicit_source = explicit_source1 + explicit_source2
+
+        if merge_implicit_source:
+            if type(self.implicit_source) is not list:
+                implicit_source1 = [self.implicit_source]
+            else:
+                implicit_source1 = self.implicit_source
+            if type(dataset.implicit_source) is not list:
+                implicit_source2 = [dataset.implicit_source]
+            else:
+                implicit_source2 = dataset.implicit_source
+            self.implicit_source = implicit_source1 + implicit_source2
+        
+    def copy(self) -> Self:
+        """
+        Copy method.
+
+        Parameters
+        ----------
+        _None_
+
+        Returns
+        -------
+        _AdvectionReactionDiffusionDataset_
+        """
+        ds_copy = AdvectionReactionDiffusionDataset(
+            name=self.name, 
+            cols=self.cols.copy(), 
+            bc=self.bc,
+            ic=self.ic,
+            diffusion_coefficient=self.diffusion_coefficient, 
+            velocity=self.velocity, 
+            explicit_source=self.explicit_source, 
+            implicit_source=self.implicit_source
+            )
+        ds_copy.subkeys = self.subkeys.copy()
+        return ds_copy
+        
+    def deep_copy(self) -> Self:
+        """
+        Deep copy method.
+
+        Parameters
+        ----------
+        _None_
+
+        Returns
+        -------
+        _AdvectionReactionDiffusionDataset_
+        """
+        new_cols = {key: col.clone() for key, col in self.cols.items()}
+        ds_copy = AdvectionReactionDiffusionDataset(
+            name=self.name, 
+            cols=new_cols, 
+            bc=self.bc,
+            ic=self.ic,
+            diffusion_coefficient=self.diffusion_coefficient, 
+            velocity=self.velocity, 
+            explicit_source=self.explicit_source, 
+            implicit_source=self.implicit_source
+        )
+        ds_copy.subkeys = self.subkeys.copy()
+        return ds_copy
+
+    def state_dict(self) -> dict:
+        if type(self.velocity) is list:
+            velocity_entry = [v.state_dict() for v in self.velocity]
+        else:
+            velocity_entry = self.velocity.state_dict()
+
+        if type(self.explicit_source) is list:
+            explicit_source_entry = [s.state_dict() for s in self.explicit_source]
+        else:
+            explicit_source_entry = self.explicit_source.state_dict()
+
+        if type(self.implicit_source) is list:
+            implicit_source_entry = [s.state_dict() for s in self.implicit_source]
+        else:
+            implicit_source_entry = self.implicit_source.state_dict()
+
+        extra_state = {
+            "diffusion_coefficient": self.diffusion_coefficient,
+            "velocity": velocity_entry,
+            "explicit_source": explicit_source_entry,
+            "implicit_source": implicit_source_entry
+        }
+
+        return super().state_dict() | extra_state
+
+    def load_state(self, state: dict) -> None:
+        super().load_state(state)
+
+        if type(state["velocity"]) is not list:
+            state["velocity"] = [state["velocity"]]
+            self.velocity = Velocity.null_velocity().load_state(state["velocity"])
+        else:
+            self.velocity = []
+            for velocity_dict in state["velocity"]:
+                self.velocity.append(Velocity.null_velocity().load_state(velocity_dict))
+
+        if type(state["explicit_source"]) is not list:
+            state["explicit_source"] = [state["explicit_source"]]
+            self.explicit_source = Source.null_source().load_state(state["explicit_source"])
+        else:
+            self.explicit_source = []
+            for explicit_source_dict in state["explicit_source"]:
+                self.explicit_source.append(Source.null_source().load_state(explicit_source_dict))
+
+        if type(state["implicit_source"]) is not list:
+            state["implicit_source"] = [state["implicit_source"]]
+            self.implicit_source = Source.null_source().load_state(state["implicit_source"])
+        else:
+            self.implicit_source = []
+            for implicit_source_dict in state["implicit_source"]:
+                self.implicit_source.append(Source.null_source().load_state(implicit_source_dict))
 
     def save(self, dst_file: str) -> None:
         """
@@ -370,20 +743,25 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
         -------
         _None_
         """
-        d = {
-            "cols": self.cols,
-            "subkeys": self.subkeys,
-            "velocity": self.velocity.state_dict(),
-            "explicit_source": self.explicit_source.state_dict(),
-            "implicit_source": self.implicit_source.state_dict()
-        }
+        d = self.state_dict()
         torch.save(d, dst_file)
+
+    def __str__(self) -> str:
+        string = super().__str__()
+        string += f"\n- Diffusion coefficient: {self.diffusion_coefficient}\n"
+        string += f"\n{self.velocity.__str__()}\n"
+        string += f"{self.explicit_source.__str__()}\n"
+        string += f"{self.implicit_source.__str__()}\n"
+        return string
+
+    def __repr__(self) -> str:
+        return self.__str__()
 
     # ------------ Class methods ------------
     @classmethod
     def load(cls, src_file: str) -> Self:
         """
-        Load the _PhySysDataset_ saved in `src_file`.
+        Load the _AdvectionReactionDiffusionDataset_ saved in `src_file`.
 
         Parameters
         ----------
@@ -392,21 +770,9 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
 
         Returns
         -------
-        _PhySysDataset_
+        _AdvectionReactionDiffusionDataset_
         """
-        d = torch.load(src_file, weights_only=False)
-        velocity = Velocity.null_velocity()
-        velocity.load_state(d["velocity"])
-        explicit_source = Source.null_source()
-        explicit_source.load_state(d["explicit_source"])
-        implicit_source = Source.null_source()
-        implicit_source.load_state(d["implicit_source"])
-        dataset = AdvectionReactionDiffusionDataset(
-            cols=d["cols"],
-            velocity=velocity,
-            explicit_source=explicit_source,
-            implicit_source=implicit_source
-        )
-        for key in d["subkeys"]:
-            dataset.set_subkeys(key=key, subkeys=d["subkeys"][key])
-        return dataset
+        state = torch.load(src_file, weights_only=False)
+        ds = AdvectionReactionDiffusionDataset(name="", cols={}, bc=None, ic=None)
+        ds.load_state(state)
+        return ds
