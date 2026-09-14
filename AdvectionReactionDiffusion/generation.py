@@ -181,6 +181,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -199,6 +201,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -218,6 +222,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -233,6 +239,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -252,6 +260,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -268,6 +278,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -284,6 +296,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -298,6 +312,8 @@ def generate_AdvectionReactionDiffusion(
                         ],
                         bc=bc,
                         ic=ic,
+                        timeline=[time],
+                        shape=shape,
                         diffusion_coefficient=diffusion_coeff,
                         velocity=velocity,
                         explicit_source=source,
@@ -309,13 +325,15 @@ def generate_AdvectionReactionDiffusion(
                 if trajectory_ds is None:
                     trajectory_ds = frame_ds
                 else:
-                    trajectory_ds.merge(frame_ds)
+                    trajectory_ds.merge(dataset=frame_ds)
             else:
                 if snapshots_ds is None:
                     snapshots_ds = frame_ds
                 else:
-                    snapshots_ds.merge(frame_ds)
+                    snapshots_ds.merge(dataset=frame_ds)
 
+    trajectory_ds.timeline = pde.trajectory.t
+    snapshots_ds.timeline = pde.trajectory.t_full
     return trajectory_ds, snapshots_ds
 
 def generate_AdvectionReactionDiffusion_unlabeled(
@@ -332,6 +350,7 @@ def generate_AdvectionReactionDiffusion_unlabeled(
         implicit_source: Source = None,
 
         shape: str = None,
+        timeline: List[float] = None,
         bc: BoundaryCondition = None,
         ic: InitialCondition = None,
 
@@ -402,6 +421,8 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             ],
             bc=bc,
             ic=ic,
+            shape=shape,
+            timeline=timeline,
             diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
@@ -419,6 +440,8 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             ],
             bc=bc,
             ic=ic,
+            shape=shape,
+            timeline=timeline,
             diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
@@ -434,6 +457,8 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             ],
             bc=bc,
             ic=ic,
+            shape=shape,
+            timeline=timeline,
             diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,
@@ -449,6 +474,8 @@ def generate_AdvectionReactionDiffusion_unlabeled(
             ],
             bc=bc,
             ic=ic,
+            shape=shape,
+            timeline=timeline,
             diffusion_coefficient=diffusion_coeff,
             velocity=velocity,
             explicit_source=source,

@@ -104,7 +104,6 @@ class PhysicsTask:
         string += f"- ID: {self.id}\n"
         string += f"- Weight: {self.weight}\n"
         string += f"- Gradient: {self.grad}\n"
-        string += f"- Gradient: {self.grad}\n"
         string += f"- Gradient norm: {self.grad_norm}\n"
         string += f"- Conflict: {self.conflict}\n"
         string += f"- Loss: {self.loss_value}\n"

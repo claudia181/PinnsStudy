@@ -15,7 +15,7 @@ from torch.func import vmap, jacrev, hessian
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 from torch.nn.utils import parameters_to_vector
-from phy_sys_dataset import PhySysDataset
+from phy_sys_dataset import PhySysDataset, AdvectionReactionDiffusionDataset
 from typing import Tuple, List, Self, Callable
 import os
 from physics_task import PhysicsTask, NeumannBCTask, DirichletBCTask, ICTask, OutputTask, DerivativeTask, SpatialDerivativeTask, TemporalDerivativeTask, Derivative2Task, SpatialDerivative2Task, TemporalDerivative2Task, AdvectionReactionDiffusionTask, StationaryAllenCahnTask
@@ -1070,7 +1070,28 @@ class Pinn(torch.nn.Module):
             tensors[u_idx] = self.forward(x, params)
             tensors[du_idx] = self.derivative(order=1, x=x, pde_params=params)
             tensors[d2u_idx] = self.derivative(order=2, x=x, pde_params=params)
-        labeled_dataset = PhySysDataset(cols=([(key, val) for key, val in zip(dataset.cols.keys(), tensors)]))
+        if type(dataset) is AdvectionReactionDiffusionDataset:
+            labeled_dataset = AdvectionReactionDiffusionDataset(
+                name=dataset.name + "L",
+                cols=([(key, val) for key, val in zip(dataset.cols.keys(), tensors)]),
+                bc=dataset.bc,
+                ic=dataset.ic,
+                timeline=dataset.timeline,
+                shape=dataset.shape,
+                diffusion_coefficient=dataset.diffusion_coefficient,
+                velocity=dataset.velocity,
+                explicit_source=dataset.explicit_source,
+                implicit_source=dataset.implicit_source
+            )
+        else:
+            labeled_dataset = PhySysDataset(
+                name=dataset.name + "L",
+                cols=([(key, val) for key, val in zip(dataset.cols.keys(), tensors)]),
+                bc=dataset.bc,
+                ic=dataset.ic,
+                timeline=dataset.timeline,
+                shape=dataset.shape
+            )
         labeled_dataset.subkeys = dataset.subkeys
         return labeled_dataset
 

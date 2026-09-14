@@ -553,7 +553,12 @@ def train_full():
         raise ValueError(f"Specify the number of epochs.")
     
     train_dataset = AdvectionReactionDiffusionDataset.load(args.train_data)
-    train_trajectory = train_dataset.datasets
+    train_trajectory = []
+    for t in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
+        snapshot_list.append(filter_points(dataset=train_dataset, ranges={"t": [t, t]}, mode="closed", shape="rectangle"))
+
+    bc = train_dataset.bc
+    ic = train_dataset.ic
 
     param_keys = train_dataset.subkeys["param"]
     diffusion_coefficient = train_dataset.diffusion_coefficient
@@ -561,12 +566,44 @@ def train_full():
     explicit_source = train_dataset.explicit_source
     implicit_source = train_dataset.implicit_source
 
-    train_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
-    train_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in train_trajectory]
+    boundary = [get_boundary(dataset=snapshot, shape=bc.shape) for snapshot in train_trajectory]
+    interior = [get_interior(dataset=snapshot, shape=bc.shape) for snapshot in train_trajectory]
 
-    val_trajectory = PhySysDataset.load(args.val_data).datasets
-    val_boundary = [get_boundary(dataset=snapshot, shape="rectangle") for snapshot in val_trajectory]
-    val_interior = [get_interior(dataset=snapshot, shape="rectangle") for snapshot in val_trajectory]
+    ge_task =  AdvectionReactionDiffusionTask(
+        param_keys=param_keys,
+        velocity=velocity,
+        source=explicit_source,
+        implicit_source=implicit_source,
+        D=diffusion_coefficient,
+        weight=1.0
+    )
+    
+    bc_task = NeumannBCTask(
+        top_flux=bc.top,
+        right_flux=bc.right,
+        bottom_flux=bc.bottom,
+        left_flux=bc.left,
+        weight=1.0
+    )
+    
+    ic_task = ICTask(weight=1.0)
+    
+    train_tasks = [ge_task, bc_task, ic_task]
+
+    val_dataset = AdvectionReactionDiffusionDataset.load(args.val_data)
+    val_trajectory = val_dataset.datasets
+
+    bc = val_dataset.bc
+    ic = val_dataset.ic
+
+    param_keys = val_dataset.subkeys["param"]
+    diffusion_coefficient = val_dataset.diffusion_coefficient
+    velocity = val_dataset.velocity
+    explicit_source = val_dataset.explicit_source
+    implicit_source = val_dataset.implicit_source
+
+    boundary = [get_boundary(dataset=snapshot, shape=bc.shape) for snapshot in val_trajectory]
+    interior = [get_interior(dataset=snapshot, shape=bc.shape) for snapshot in val_trajectory]
 
     ge_task =  AdvectionReactionDiffusionTask(
         param_keys=param_keys,
@@ -578,31 +615,255 @@ def train_full():
     )
 
     bc_task = NeumannBCTask(
-        top_flux=train_dataset.
+        top_flux=bc.top,
+        right_flux=bc.right,
+        bottom_flux=bc.bottom,
+        left_flux=bc.left,
+        weight=1.0
     )
 
-    train_tasks = [
-        AdvectionReactionDiffusionTask(
-            param_keys = param_keys,
-            velocity
+    ic_task = ICTask(weight=1.0)
+
+    val_tasks = [ge_task, bc_task, ic_task]
+
+
+
+BATCH_SIZE = [32, 64, 128, 256, 512, 1024]
+LEARNING_RATE = [1e-2, 1e-3, 1e-4]
+EPOCHS = 100
+DEVICE = "cpu"
+TRAIN_DATA = ""
+VAL_DATA = ""
+SEED = 42
+DESTINATION = "./experiment"
+
+FF = False
+FF_SIZE = 0
+FF_FREQUENCY_VAR = 0
+
+DWA = True
+DWA_MODE = "Std"
+DWA_ALPHA = 0.9
+DWA_MOVING_AVG_FREQUENCY = 1
+DWA_WARM_UP = 3
+
+#EWC = False
+#EWC_FRICTIONING_MODEL = ""
+#EWC_WEIGHT = 0
+#EWC_AUTO_WEIGHTING = False
+#EWC_WARM_UP = 0
+#EWC_DECAY_FACTOR = 0
+#EWC_MOVING_AVG_FACTOR = 0
+
+train_dataset = AdvectionReactionDiffusionDataset.load(TRAIN_DATA)
+train_trajectory = train_dataset.trajectory()
+train_initial_state = train_trajectory[0]
+
+bc = train_dataset.bc
+ic = train_dataset.ic
+
+train_boundary = [snapshot.boundary() for snapshot in train_trajectory]
+train_interior = [snapshot.interior() for snapshot in train_trajectory]
+
+param_keys = train_dataset.subkeys["param"]
+diffusion_coefficient = train_dataset.diffusion_coefficient
+velocity = train_dataset.velocity
+explicit_source = train_dataset.explicit_source
+implicit_source = train_dataset.implicit_source
+
+ge_task = AdvectionReactionDiffusionTask(
+    param_keys=param_keys,
+    velocity=velocity,
+    source=explicit_source,
+    implicit_source=implicit_source,
+    D=diffusion_coefficient,
+    weight=1.0
+)
+
+bc_task = NeumannBCTask(
+    top_flux=bc.top,
+    right_flux=bc.right,
+    bottom_flux=bc.bottom,
+    left_flux=bc.left,
+    weight=1.0
+)
+
+ic_task = ICTask(weight=1.0)
+
+train_tasks = [ge_task, bc_task, ic_task]
+
+val_dataset = AdvectionReactionDiffusionDataset.load(VAL_DATA)
+val_trajectory = val_dataset.trajectory()
+val_initial_state = val_trajectory[0]
+
+bc = val_dataset.bc
+ic = val_dataset.ic
+
+val_boundary = [snapshot.boundary() for snapshot in val_trajectory]
+val_interior = [snapshot.interior() for snapshot in val_trajectory]
+
+param_keys = val_dataset.subkeys["param"]
+diffusion_coefficient = val_dataset.diffusion_coefficient
+velocity = val_dataset.velocity
+explicit_source = val_dataset.explicit_source
+implicit_source = val_dataset.implicit_source
+
+ge_task =  AdvectionReactionDiffusionTask(
+    param_keys=param_keys,
+    velocity=velocity,
+    source=explicit_source,
+    implicit_source=implicit_source,
+    D=diffusion_coefficient,
+    weight=1.0
+)
+
+bc_task = NeumannBCTask(
+    top_flux=bc.top,
+    right_flux=bc.right,
+    bottom_flux=bc.bottom,
+    left_flux=bc.left,
+    weight=1.0
+)
+
+ic_task = ICTask(weight=1.0)
+
+val_tasks = [ge_task, bc_task, ic_task]
+
+def objective(trial):
+    # Sample hyperparameters
+    if type(BATCH_SIZE) is list:
+        trial_batch_size = trial.suggest_categorical("batch_size", BATCH_SIZE)
+    else:
+        trial_batch_size = BATCH_SIZE
+            
+    train_iterators, train_steps_per_epoch = get_iterators(datas=[train_interior, train_boundary, train_initial_state], batch_size=trial_batch_size, seed=SEED)
+    val_iterators, val_steps_per_epoch = get_iterators(datas=[val_interior, val_boundary, val_initial_state], batch_size=trial_batch_size, seed=SEED)
+            
+    if type(LEARNING_RATE) is list:
+        trial_learning_rate = trial.suggest_categorical("learning_rate", LEARNING_RATE)
+    else:
+        trial_learning_rate = LEARNING_RATE
+    
+    if FF:
+        if FF_SIZE is not None and FF_FREQUENCY_VAR is not None:
+            if type(FF_FREQUENCY_VAR) is list:
+                trial_ff_frequency_var = trial.suggest_categorical("ff_frequency_var", FF_FREQUENCY_VAR)
+            else:
+                trial_ff_frequency_var = FF_FREQUENCY_VAR
+
+            if type(FF_SIZE) is list:
+                trial_ff_size = trial.suggest_categorical("ff_size", FF_SIZE)
+            else:
+                trial_ff_size = FF_SIZE
+
+            model.sample_B_and_set_ff(
+                n_fourier_features = trial_ff_size,
+                frequency_variance = trial_ff_frequency_var
+            )
+
+    if DWA:
+        if type(DWA_ALPHA) is list:
+            trial_dwa_alpha = trial.suggest_categorical("dwa_alpha", DWA_ALPHA)
+        else:
+            trial_dwa_alpha = DWA_ALPHA
+        
+        model.set_dwa(
+            dwa_mode = DWA_MODE,
+            dwa_alpha = trial_dwa_alpha,
+            moving_avg_frequency = DWA_MOVING_AVG_FREQUENCY,
+            dwa_warm_up = DWA_WARM_UP
         )
-        AdvectionReactionDiffusionTask(
-            parameters=fixed_params,
-            velocity=v
-        ),
-        NeumannBCTask(),
-        ICTask()
-    ]
-    weights = [1.0 for _ in train_tasks]
+    
+            if ewc:
+                if type(ewc_weight) is list:
+                    trial_ewc_weight = trial.suggest_categorical("ewc_weight", ewc_weight)
+                else:
+                    trial_ewc_weight = ewc_weight
+    
+                if type(ewc_warm_up) is list:
+                    trial_ewc_warm_up = trial.suggest_categorical("ewc_warm_up", ewc_warm_up)
+                else:
+                    trial_ewc_warm_up = ewc_warm_up
+    
+                if type(ewc_decay_factor) is list:
+                    trial_ewc_decay = trial.suggest_categorical("ewc_decay", ewc_decay_factor)
+                else:
+                    trial_ewc_decay = ewc_decay_factor
+                
+                if type(ewc_moving_avg_factor) is list:
+                    trial_ewc_moving_avg_factor = trial.suggest_categorical("ewc_moving_avg_factor", ewc_moving_avg_factor)
+                else:
+                    trial_ewc_moving_avg_factor = ewc_moving_avg_factor
+                
+                ewc_fisher_diag = trial_ewc_moving_avg_factor * fisher_diag_new + (1 - trial_ewc_moving_avg_factor) * fisher_diag_avg
+    
+                model.set_ewc(
+                    ewc_objective_weights = ewc_objective_weights,
+                    ewc_fisher_diag = ewc_fisher_diag,
+                    ewc_weight = trial_ewc_weight,
+                    ewc_auto_weighting = ewc_auto_weighting,
+                    ewc_warm_up = trial_ewc_warm_up,
+                    ewc_decay = trial_ewc_decay
+                )
+    
+            # Prepare the tasks
+            val_tasks = [task.copy() for task in new_tasks]
+            
+            for i, weight in enumerate(new_weights):
+                if type(weight) is list:
+                    new_tasks[i].weight = trial.suggest_categorical(f"new_weight{i}", weight)
+                else:
+                    new_tasks[i].weight = weight
+            
+            for i, weight in enumerate(recall_weights):
+                if type(weight) is list:
+                    recall_tasks[i].weight = trial.suggest_categorical(f"recall_weight{i}", weight)
+                else:
+                    recall_tasks[i].weight = weight
+            
+            for task in new_tasks + recall_tasks + val_tasks + monitoring_tasks:
+                task.grad_norm = None
+                task.grad = None
+                task.conflict = None
+                task.loss_value = None
+    
+            model.set_train_tasks(new_tasks + recall_tasks)
+            model.set_eval_tasks(val_tasks + monitoring_tasks)
+    
+            optimizer = Adam(params=model.parameters(), lr=trial_learning_rate)
+            lr_scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+
+
+
+
+#########
+    optimizer = Adam(params=model.parameters(), lr=trial_learning_rate)
+    lr_scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     
     model = Pinn(
-        device = args.device,#TODO
-        hidden_units = [50, 50, 50, 50],
-        activation_str = "tanh",
-        temporal_input = 1,
-        spatial_input = 2,
-        param_input = 0
+        device = args.device,
+        activation_function_key="tanh",
+        temporal_input=1,
+        spatial_input=2,
+        param_input=0,
+        hidden_units=[50, 50, 50, 50],
+        dwa_mode="Std",
+        dwa_alpha=0.9,
+        dwa_moving_avg_frequency=1,
+        dwa_warm_up=3,
+        ff_encoding=False,
+        ewc=False,
+        train_task_list=train_tasks,
+        eval_task_list=val_tasks,
+        monitor_conflicts=True,
+        conflict_reference_task=0,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        input_params_dict={}
     )
+
+
+
 
     train(
         model = model,

@@ -67,6 +67,7 @@ from AdvectionReactionDiffusion.advection_velocity import Velocity
 from AdvectionReactionDiffusion.reaction_source import Source
 from AdvectionReactionDiffusion.boundary_condition import BoundaryCondition, RectangularBoundaryCondition, CircularBoundaryCondition
 from AdvectionReactionDiffusion.initial_condition import InitialCondition
+import copy
 
 # ===================================== PhySysDataset class =====================================
 class PhySysDataset(Dataset):
@@ -75,8 +76,10 @@ class PhySysDataset(Dataset):
             self,
             name: str,
             cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor],
-            bc: BoundaryCondition | List[BoundaryCondition],
-            ic: InitialCondition | List[InitialCondition]
+            bc: BoundaryCondition | List[BoundaryCondition] = None,
+            ic: InitialCondition | List[InitialCondition] = None,
+            timeline: List[float] | List[List[float]] = [],
+            shape: str | list[str] = ""
     ) -> None:
         self.name = name
         self.cols = {}
@@ -104,6 +107,8 @@ class PhySysDataset(Dataset):
         self.subkeys = {}
         self.bc = bc
         self.ic = ic
+        self.timeline = timeline
+        self.shape = shape
 
     def __len__(self) -> int:
         return self.length
@@ -241,12 +246,14 @@ class PhySysDataset(Dataset):
             name=self.name,
             cols=subsampled_cols,
             bc=self.bc,
-            ic=self.ic
+            ic=self.ic,
+            timeline=self.timeline,
+            shape=self.shape
         )
         subsampled_ds.subkeys = self.subkeys.copy()
         return subsampled_ds
     
-    def merge(self, dataset: Self, merge_bc: bool = False, merge_ic: bool = False) -> None:
+    def merge(self, dataset: Self, merge_bc: bool = False, merge_ic: bool = False, merge_timeline: bool = False, merge_shape: bool = False) -> None:
         """
         Merge the _PhySysDataset_ `dataset` the current one.
 
@@ -289,8 +296,183 @@ class PhySysDataset(Dataset):
                 ic2 = dataset.ic
             self.ic = ic1 + ic2
 
+        if merge_timeline:
+            if len(self.timeline) > 0 and type(self.timeline[0]) is not list:
+                timeline1 = [self.timeline]
+            else:
+                timeline1 = self.timeline
+            if len(dataset.timeline) > 0 and type(dataset.timeline[0]) is not list:
+                timeline2 = [dataset.timeline]
+            else:
+                timeline2 = dataset.timeline
+            self.timeline = timeline1 + timeline2
+
+        if merge_shape:
+            if type(self.shape) is not list:
+                shape1 = [self.shape]
+            else:
+                shape1 = self.shape
+            if type(dataset.shape) is not list:
+                shape2 = [dataset.shape]
+            else:
+                shape2 = dataset.shape
+            self.shape = shape1 + shape2
+
     def get_keys(self) -> List[str]:
         return list(self.cols.keys())
+
+    def trajectory(self) -> List[Self]:
+        trajectory = []
+        for t in self.timeline:
+            trajectory.append(self.filter_points(ranges={"t": [t, t]}, mode="closed", shape="rectangle"))
+        return trajectory
+
+    def boundary(
+            self,
+            cell_size: float = 0.0,
+            center: list = [0.0, 0.0],
+            radius: float = 1.0,
+            insert_out_normal: bool = True,
+            eps: float = 1e-6
+    ) -> Self:
+        """
+        Extract the boundary points from the dataset for a given time instant.
+
+        Parameters
+        ----------
+        dataset : ConcatDataset|PhySysDataset
+        shape : str
+            "rectangle" | "circle".
+        cell_size : float
+        t : int
+            Time index.
+
+        Returns
+        -------
+        PhySysDataset
+            The PhySysDataset containing the boundary points at t.
+        """
+        spatial_keys = [key for key in self.subkeys["spacetime"] if key != "t"]
+        if len(spatial_keys) == 0:
+            raise ValueError(f"0-dimentional spatial domain.")
+        if self.shape == "rectangle":
+            ranges = {}
+            for key in spatial_keys:
+                x = self.cols["spacetime"][:, self.index("spacetime", key)]
+                ranges[key] = [x.min(), x.max()]
+
+            boundary = []
+            outward_normal_vectors = []
+            for key in spatial_keys:
+                xmin = ranges[key][0]
+                side = copy.deepcopy(ranges)
+                side[key] = [xmin, xmin]
+                boundary.append(side)
+                if insert_out_normal:
+                    if len(spatial_keys) == 1:
+                        outward_normal_vectors.append(-1.)
+                    else:
+                        outward_normal_vector = [0. for _ in spatial_keys]
+                        outward_normal_vector[self.index("spacetime", key)] = -1.
+                        outward_normal_vectors.append(outward_normal_vector)
+
+                xmax = ranges[key][1]
+                side = copy.deepcopy(ranges)
+                side[key] = [xmax, xmax]
+                boundary.append(side)
+                if insert_out_normal:
+                    if len(spatial_keys) == 1:
+                        outward_normal_vectors.append(1.)
+                    else:
+                        outward_normal_vector = [0. for _ in spatial_keys]
+                        outward_normal_vector[self.index("spacetime", key)] = 1.
+                        outward_normal_vectors.append(outward_normal_vector)
+
+                # boundary = [
+                #     {"x": [xmin, xmin], "y": [ymin, ymax], "z": [zmin, zmax]},
+                #     {"x": [xmax, xmax], "y": [ymin, ymax], "z": [zmin, zmax]},
+                #     {"x": [xmin, xmax], "y": [ymin, ymin], "z": [zmin, zmax]},
+                #     {"x": [xmin, xmax], "y": [ymax, ymax], "z": [zmin, zmax]}
+                # ]
+
+                # outward_normal_vectors = [-1., 1.]
+                # outward_normal_vectors = [[-1., 0.], [1., 0.], [0., -1.], [0., 1.]]
+                # outward_normal_vectors = [[-1., 0., 0.], [1., 0., 0.], [0., -1., 0.], [0., 1., 0.], [0., 0., -1.], [0., 0., 1.]]
+
+            filtered_ds = self.filter_points(ranges=boundary[0], mode="closed", shape=self.shape, eps=eps)
+            if insert_out_normal:
+                n_col = torch.tensor(outward_normal_vectors[0]).repeat(filtered_ds.length, 1)
+
+            for side, n in zip(boundary[1:], outward_normal_vectors):
+                side_ds = self.filter_points(ranges=side, mode="closed", shape=self.shape, eps=eps)
+                filtered_ds.merge(self.filter_points(ranges=side, mode="closed", shape=self.shape, eps=eps))
+                if insert_out_normal:
+                    n_col = torch.cat((n_col, torch.tensor(n).repeat(side_ds.length, 1)))
+
+            if insert_out_normal:
+                filtered_ds.add_column(key="n", col=n_col, subkeys=spatial_keys)
+
+        elif self.shape == "circle":
+            for key in spatial_keys:
+                boundary[key] = center[self.index("spacetime", key)]
+            boundary["r"] = [radius-0.5*cell_size, radius+0.5*cell_size] # [radius-cell_size, radius]
+            # boundary = {
+            #   "x": center[ix], 
+            #   "y": center[iy], 
+            #   "z": center[iz], 
+            #   "r": [radius-0.5*cell_size, radius+0.5*cell_size]
+            # }
+            filtered_ds = self.filter_points(ranges=boundary, mode="closed", shape=self.shape, eps=eps)
+            if insert_out_normal:
+                center = torch.tensor(center).repeat(filtered_ds.length, 1)
+                spatial_indexes = [self.index("spacetime", key) for key in spatial_keys]
+                out_vect = filtered_ds.cols["spacetime"][:, spatial_indexes] - center
+                outward_normal_vectors = out_vect / torch.linalg.norm(out_vect, dim=1, keepdim=True)
+                filtered_ds.add_column("n", outward_normal_vectors, spatial_keys, spatial_keys)
+        else:
+            raise ValueError(f"Unrecognized {self.shape} boundary shape.")
+
+        return filtered_ds
+
+    def interior(
+            self,
+            cell_size: float = 0.0,
+            center: list = [0.0, 0.0],
+            radius: float = 1.0,
+            eps: float = 1e-6
+    ) -> Self:
+        """
+        Extract the interior points from the dataset for a given time instant.
+
+        Parameters
+        ----------
+        dataset : ConcatDataset|PhySysDataset
+        t : int
+            Time index.
+        shape : str
+            "rectangle" | "circle".
+        cell_size : float
+
+        Returns
+        -------
+        PhySysDataset
+            The PhySysDataset containing the interior points at t.
+        """
+        spatial_keys = [key for key in self.subkeys["spacetime"] if key != "t"]
+        ranges = {}
+        if self.shape == "rectangle":
+            for key in spatial_keys:
+                x = self.cols["spacetime"][:, self.index("spacetime", key)]
+                ranges[key] = [x.min(), x.max()]
+            # ranges = {"x": [xmin, xmax], "y": [ymin, ymax]}
+        elif self.shape == "circle":
+            for key in spatial_keys:
+                ranges[key] = center[self.index("spacetime", key)]
+            ranges["r"] = [-1.0, radius-0.5*cell_size]
+            # ranges = {"x": center[0], "y": center[1], "r": [-1.0, radius-0.5*cell_size]}
+        else:
+            raise ValueError(f"Unrecognized {self.shape} boundary shape.")
+        return self.filter_points(ranges=ranges, mode="open", shape=self.shape, eps=eps)
     
     def copy(self) -> Self:
         """
@@ -308,7 +490,9 @@ class PhySysDataset(Dataset):
             name=self.name, 
             cols=self.cols.copy(),
             bc=self.bc,
-            ic=self.ic
+            ic=self.ic,
+            timeline=self.timeline,
+            shape=self.shape
         )
         ds_copy.subkeys = self.subkeys.copy()
         return ds_copy
@@ -330,10 +514,88 @@ class PhySysDataset(Dataset):
             name=self.name,
             cols=new_cols,
             bc=self.bc,
-            ic=self.ic
+            ic=self.ic,
+            timeline=self.timeline,
+            shape=self.shape
         )
         ds_copy.subkeys = self.subkeys.copy()
         return ds_copy
+
+    def filter_points(
+            self,
+            ranges: dict|List[dict], 
+            mode: str,
+            shape: str = "rectangle",
+            eps: float = 1e-6
+    ) -> Self:
+        """
+        Filter columns keeping elements within ranges and return the relative dataset.
+
+        Parameters
+        ----------
+        columns : PhySysDataset
+        ranges : dict|List[dict]
+        mode : str
+            Closed or open.
+        shape : str
+            "rectangle"|"circle", default = "rectangle";
+
+            if "rectangle", each key in spatial_ranges is a model a side;
+
+            if "circle", entry of key "r" is the radius and the other keys encode the center coordinates.
+
+        Returns
+        -------
+        PhySysDataset
+            The filtered dataset.
+        """
+        if type(ranges) is dict:
+            ranges = [ranges]
+        masks = []
+        for subset in ranges:
+            mask = torch.ones(self.length, dtype=bool)
+            if shape == "rectangle":
+                for key in subset.keys():
+                    xmin = subset[key][0] - eps
+                    xmax = subset[key][1] + eps
+                    x = self.cols["spacetime"][:, self.index(key="spacetime", subkey=key)]
+                    if mode == "closed":
+                        mask = mask & (x >= xmin) & (x <= xmax)
+                    elif mode == "open":
+                        mask = mask & (x > xmin) & (x < xmax)
+                    else:
+                        raise ValueError(f"Unrecognized mode {mode}.")
+            elif shape == "circle":
+                center_coords = [subset[key] for key in subset.keys() if key != "r"]
+                coords_indexes = [self.index(key="spacetime", subkey=key) for key in subset.keys() if key != "r"]
+                rmin = subset["r"][0] - eps
+                rmax = subset["r"][1] + eps
+                x = self.cols["spacetime"][:, coords_indexes]
+                center = torch.tensor(
+                    center_coords,
+                    dtype=x.dtype,
+                    device=x.device
+                )
+                if mode == "closed":
+                    mask = mask & (torch.linalg.norm(x - center, axis=1) >= rmin) & (torch.linalg.norm(x - center, axis=1) <= rmax)
+                elif mode == "open":
+                    mask = mask & (torch.linalg.norm(x - center, axis=1) > rmin) & (torch.linalg.norm(x - center, axis=1) < rmax)
+                else:
+                    raise ValueError(f"Unrecognized mode {mode}.")
+            else:
+                raise ValueError(f"Unrecognized shape {shape}.")
+            masks.append(mask)  
+        mask = masks[0]
+        for m in masks[1:]:
+            mask = mask | m
+
+        cols = {}
+        for key in self.cols.keys():
+            cols[key] = self.cols[key][mask]
+
+        filtered_dataset = PhySysDataset(name=self.name, cols=cols, bc=self.bc, ic=self.ic, timeline=self.timeline, shape=shape)
+        filtered_dataset.subkeys = self.subkeys
+        return filtered_dataset
     
     def state_dict(self) -> dict:
         if type(self.bc) is list:
@@ -351,7 +613,9 @@ class PhySysDataset(Dataset):
             "cols": self.cols,
             "subkeys": self.subkeys,
             "bc": bcs,
-            "ic": ics
+            "ic": ics,
+            "timeline": self.timeline,
+            "shape": self.shape
         }
     
     def load_state(self, state: dict) -> None:
@@ -378,6 +642,9 @@ class PhySysDataset(Dataset):
             self.ic = []
             for ic_dict in state["ic"]:
                 self.ic.append(InitialCondition().load_state(ic_dict))
+
+        self.timeline = state["timeline"]
+        self.shape = state["shape"]
     
     def save(self, dst_file: str) -> None:
         """
@@ -429,14 +696,32 @@ class PhySysDataset(Dataset):
         if type(self.bc) is list:
             for bc in self.bc:
                 string += f"\n{bc.__str__()}"
+        elif self.ic is None:
+            string += f"\n- Boundary conditions: None"
         else:
             string += f"\n{self.bc.__str__()}"
 
         if type(self.ic) is list:
             for ic in self.ic:
                 string += f"\n{ic.__str__()}"
+        elif self.ic is None:
+            string += f"\n- Initial conditions: None"
         else:
             string += f"\n{self.ic.__str__()}"
+
+        if len(self.timeline) > 0 and type(self.timeline[0]) is list:
+            string += f"\n- timeline:\n"
+            for t_list in self.timeline:
+                string += f"-- {t_list}\n"
+        else:
+            string += f"\n- timeline: {self.timeline}\n"
+
+        if type(self.shape) is list:
+            string += f"\n- shape:\n"
+            for shape in self.shape:
+                string += f"\n-- {shape.__str__()}"
+        else:
+            string += f"\n- shape: {self.shape.__str__()}"
             
         return string
 
@@ -460,7 +745,7 @@ class PhySysDataset(Dataset):
         """
         state = torch.load(src_file, weights_only=False)
 
-        ds = PhySysDataset(name="", cols={}, bc=None, ic=None)
+        ds = PhySysDataset(name="", cols={}, bc=None, ic=None, timeline=[], shape="")
 
         ds.load_state(state=state)
 
@@ -471,8 +756,10 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             self,
             name: str,
             cols: List[Tuple[str, list|torch.Tensor]] | Dict[str, torch.Tensor],
-            bc: BoundaryCondition | List[BoundaryCondition],
-            ic: InitialCondition | List[InitialCondition],
+            bc: BoundaryCondition | List[BoundaryCondition] = None,
+            ic: InitialCondition | List[InitialCondition] = None,
+            timeline: List[float] | List[List[float]] = [],
+            shape: str | List[str] = "",
             diffusion_coefficient: float | List[float] = None,
             velocity: Velocity | List[Velocity] = None,
             explicit_source: Source | List[Source] = None,
@@ -482,7 +769,9 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             name=name, 
             cols=cols,
             bc=bc,
-            ic=ic
+            ic=ic,
+            timeline=timeline,
+            shape=shape
         )
 
         if diffusion_coefficient is None:
@@ -522,6 +811,8 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             cols=subsampled_cols, 
             bc=self.bc,
             ic=self.ic,
+            timeline=self.timeline,
+            shape=self.shape,
             diffusion_coefficient=self.diffusion_coefficient,
             velocity=self.velocity, 
             explicit_source=self.explicit_source, 
@@ -535,6 +826,8 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             dataset: Self,
             merge_bc: bool = False,
             merge_ic: bool = False,
+            merge_timeline: bool = False,
+            merge_shape: bool = False,
             merge_diffusion_coefficient: bool = False,
             merge_velocity: bool = False,
             merge_explicit_source: bool = False,
@@ -552,35 +845,53 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
         -------
         _None_
         """
-        if len(dataset.cols.keys()) != len(self.cols.keys()):
-            raise ValueError(f"Different columns to merge: {self.cols.keys()} != {dataset.cols.keys()}.")
-        for key, col in dataset.cols.items():
-            if key not in self.cols.keys():
-                raise ValueError(f"Column {key} not in {self.cols.keys()}.")
-            self.cols[key] = torch.cat((self.cols[key], col))
-        self.length += dataset.length
-
-        if merge_bc:
-            if type(self.bc) is not list:
-                bc1 = [self.bc]
-            else:
-                bc1 = self.bc
-            if type(dataset.bc) is not list:
-                bc2 = [dataset.bc]
-            else:
-                bc2 = dataset.bc
-            self.bc = bc1 + bc2
-
-        if merge_ic:
-            if type(self.ic) is not list:
-                ic1 = [self.ic]
-            else:
-                ic1 = self.ic
-            if type(dataset.ic) is not list:
-                ic2 = [dataset.ic]
-            else:
-                ic2 = dataset.ic
-            self.ic = ic1 + ic2
+        #if len(dataset.cols.keys()) != len(self.cols.keys()):
+        #    raise ValueError(f"Different columns to merge: {self.cols.keys()} != {dataset.cols.keys()}.")
+        #for key, col in dataset.cols.items():
+        #    if key not in self.cols.keys():
+        #        raise ValueError(f"Column {key} not in {self.cols.keys()}.")
+        #    self.cols[key] = torch.cat((self.cols[key], col))
+        #self.length += dataset.length
+#
+        #if merge_bc:
+        #    if type(self.bc) is not list:
+        #        bc1 = [self.bc]
+        #    else:
+        #        bc1 = self.bc
+        #    if type(dataset.bc) is not list:
+        #        bc2 = [dataset.bc]
+        #    else:
+        #        bc2 = dataset.bc
+        #    self.bc = bc1 + bc2
+#
+        #if merge_ic:
+        #    if type(self.ic) is not list:
+        #        ic1 = [self.ic]
+        #    else:
+        #        ic1 = self.ic
+        #    if type(dataset.ic) is not list:
+        #        ic2 = [dataset.ic]
+        #    else:
+        #        ic2 = dataset.ic
+        #    self.ic = ic1 + ic2
+#
+        #if merge_timeline:
+        #    if len(self.timeline) > 0 and type(self.timeline[0]) is not list:
+        #        timeline1 = [self.timeline]
+        #    else:
+        #        timeline1 = self.timeline
+        #    if len(dataset.timeline) > 0 and type(dataset.timeline[0]) is not list:
+        #        timeline2 = [dataset.timeline]
+        #    else:
+        #        timeline2 = dataset.timeline
+        #    self.timeline = timeline1 + timeline2
+        super().merge(
+            dataset=dataset,
+            merge_bc=merge_bc,
+            merge_ic=merge_ic,
+            merge_timeline=merge_timeline,
+            merge_shape=merge_shape
+        )
 
         if merge_diffusion_coefficient:
             if type(self.diffusion_coefficient) is not list:
@@ -625,6 +936,86 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             else:
                 implicit_source2 = dataset.implicit_source
             self.implicit_source = implicit_source1 + implicit_source2
+
+    def filter_points(
+            self,
+            ranges: dict|List[dict],
+            mode: str,
+            shape: str = "rectangle",
+            eps: float = 1e-6
+    ) -> Self:
+        ds = super().filter_points(
+            ranges=ranges,
+            mode=mode,
+            shape=shape,
+            eps=eps
+        )
+        return AdvectionReactionDiffusionDataset(
+            name=ds.name,
+            cols=ds.cols,
+            bc=ds.bc,
+            ic = ds.ic,
+            timeline=ds.timeline,
+            shape=ds.shape,
+            diffusion_coefficient=self.diffusion_coefficient,
+            velocity=self.velocity,
+            explicit_source=self.explicit_source,
+            implicit_source=self.implicit_source
+        )
+
+    def boundary(
+            self,
+            cell_size: float = 0.0,
+            center: list = [0.0, 0.0],
+            radius: float = 1.0,
+            insert_out_normal: bool = True,
+            eps: float = 1e-6
+    ) -> Self:
+        ds = super().boundary(
+            cell_size=cell_size,
+            center=center,
+            radius=radius,
+            insert_out_normal=insert_out_normal,
+            eps=eps
+        )
+        return AdvectionReactionDiffusionDataset(
+            name=ds.name,
+            cols=ds.cols,
+            bc=ds.bc,
+            ic = ds.ic,
+            timeline=ds.timeline,
+            shape=ds.shape,
+            diffusion_coefficient=self.diffusion_coefficient,
+            velocity=self.velocity,
+            explicit_source=self.explicit_source,
+            implicit_source=self.implicit_source
+        )
+
+    def interior(
+            self,
+            cell_size: float = 0.0,
+            center: list = [0.0, 0.0],
+            radius: float = 1.0,
+            eps: float = 1e-6
+    ) -> Self:
+        ds = super().interior(
+            cell_size=cell_size,
+            center=center,
+            radius=radius,
+            eps=eps
+        )
+        return AdvectionReactionDiffusionDataset(
+            name=ds.name,
+            cols=ds.cols,
+            bc=ds.bc,
+            ic = ds.ic,
+            timeline=ds.timeline,
+            shape=ds.shape,
+            diffusion_coefficient=self.diffusion_coefficient,
+            velocity=self.velocity,
+            explicit_source=self.explicit_source,
+            implicit_source=self.implicit_source
+        )
         
     def copy(self) -> Self:
         """
@@ -643,6 +1034,8 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             cols=self.cols.copy(), 
             bc=self.bc,
             ic=self.ic,
+            timeline=self.timeline,
+            shape=self.shape,
             diffusion_coefficient=self.diffusion_coefficient, 
             velocity=self.velocity, 
             explicit_source=self.explicit_source, 
@@ -669,6 +1062,8 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
             cols=new_cols, 
             bc=self.bc,
             ic=self.ic,
+            timeline=self.timeline,
+            shape=self.shape,
             diffusion_coefficient=self.diffusion_coefficient, 
             velocity=self.velocity, 
             explicit_source=self.explicit_source, 
@@ -773,6 +1168,6 @@ class AdvectionReactionDiffusionDataset(PhySysDataset):
         _AdvectionReactionDiffusionDataset_
         """
         state = torch.load(src_file, weights_only=False)
-        ds = AdvectionReactionDiffusionDataset(name="", cols={}, bc=None, ic=None)
+        ds = AdvectionReactionDiffusionDataset(name="", cols={}, bc=None, ic=None, timeline=[], shape="")
         ds.load_state(state)
         return ds

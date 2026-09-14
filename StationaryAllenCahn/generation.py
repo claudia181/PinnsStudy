@@ -70,7 +70,9 @@ def generate_AllenCahn(
                 ("param", params)
             ],
             bc=None,
-            ic=None
+            ic=None,
+            timeline=[],
+            shape="rectangle"
         )
         dataset.set_subkeys("param", param_keys)
     else:
@@ -83,7 +85,9 @@ def generate_AllenCahn(
                 ("d2u", pde.d2u)
             ],
             bc=None,
-            ic=None
+            ic=None,
+            timeline=[],
+            shape="rectangle"
         )
     dataset.set_subkeys("spacetime", ["x", "y"])
     return dataset
@@ -118,7 +122,7 @@ def generate_AllenCahn_unlabeled(
                 params.append(item)
                 param_keys.append(f"xi{i}")
     if params == []:
-       dataset = PhySysDataset(name=dataset_name, cols=[("spacetime", X)], bc=None, ic=None)
+       dataset = PhySysDataset(name=dataset_name, cols=[("spacetime", X)], bc=None, ic=None, timeline=[], shape="rectangle")
     else:
         params = torch.tensor(params).repeat(len(X), 1)
         dataset = PhySysDataset(
@@ -128,7 +132,9 @@ def generate_AllenCahn_unlabeled(
                 ("param", params)
             ],
             bc=None,
-            ic=None
+            ic=None,
+            timeline=[],
+            shape="rectangle"
         )
         dataset.set_subkeys("param", param_keys)
     dataset.set_subkeys("spacetime", ["x", "y"])

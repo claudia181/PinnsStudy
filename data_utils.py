@@ -86,7 +86,7 @@ def filter_points(
     for key in dataset.cols.keys():
         cols[key] = dataset.cols[key][mask]
 
-    filtered_dataset = PhySysDataset(name=dataset.name, cols=cols, bc=dataset.bc, ic=dataset.ic)
+    filtered_dataset = PhySysDataset(name=dataset.name, cols=cols, bc=dataset.bc, ic=dataset.ic, timeline=dataset.timeline, shape=shape)
     filtered_dataset.subkeys = dataset.subkeys
     return filtered_dataset
 
@@ -266,7 +266,7 @@ def get_interior(
         raise ValueError(f"Unrecognized {shape} boundary shape.")
     return filter_points(dataset=dataset, ranges=ranges, mode="open", shape=shape, eps=eps)
 
-def subsample(datasets: list[PhySysDataset], samples_per_dataset: int, seed: int = 42) -> PhySysDataset:
+def subsample(datasets: List[PhySysDataset], samples_per_dataset: int, new_name: str, seed: int = 42) -> PhySysDataset:
     """
     Randomly permute and subsample datasets (seed for reproducibility), and then insert the resulting samples in a PhySysDataset.
 
@@ -274,6 +274,7 @@ def subsample(datasets: list[PhySysDataset], samples_per_dataset: int, seed: int
     ----------
     datasets : list[PhySysDataset]
     samples_per_dataset : int
+    new_name : str
     seed : int
 
     Returns
@@ -281,7 +282,11 @@ def subsample(datasets: list[PhySysDataset], samples_per_dataset: int, seed: int
     ConcatDataset
     """
     seeds = [seed+i for i in range(len(datasets))] 
-    cols = None   
+    cols = None
+    bc = []
+    ic = []
+    timeline = []
+    shape = []
     for ds, seed in zip(datasets, seeds):
         torch.manual_seed(seed)
         indices = torch.randperm(ds.length)[:samples_per_dataset]
@@ -291,8 +296,34 @@ def subsample(datasets: list[PhySysDataset], samples_per_dataset: int, seed: int
         else:
             for i, col in enumerate(new_cols):
                 cols[i] = torch.cat([cols[i], col])
+        if type(ds.bc) is list:
+            bc += ds.bc
+        else:
+            bc.append(bc)
+        
+        if type(ds.ic) is list:
+            ic += ds.ic
+        else:
+            ic.append(ic)
+
+        if len(ds.timeline) > 0 and type(ds.timeline[0]) is list:
+            timeline += ds.timeline
+        else:
+            timeline.append(ds.timeline)
+
+        if type(ds.shape) is list:
+            shape += ds.shape
+        else:
+            shape.append(shape)
     
-    new_ds = PhySysDataset([(key, col) for key, col in zip(datasets[0].cols.keys(), cols)])
+    new_ds = PhySysDataset(
+        name=new_name,
+        cols=[(key, col) for key, col in zip(datasets[0].cols.keys(), cols)],
+        bc=bc,
+        ic=ic,
+        timeline=timeline,
+        shape=shape
+    )
     for k in datasets[0].subkeys.keys():
         new_ds.set_subkeys(k, datasets[0].subkeys[k])
     return new_ds
